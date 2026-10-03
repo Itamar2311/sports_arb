@@ -1,0 +1,7 @@
+__pycache__/
+.idea/
+arb_trades.json
+arb_trades.csv
+arb_dashboard.html
+arb_log.txt
+*.tmp
