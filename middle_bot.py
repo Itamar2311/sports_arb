@@ -18,22 +18,17 @@ Every scan:
    an under/away side further along, so both can win.
 3. Stakes: $STAKE split so either single win pays the same, rounded to whole dollars.
        worst = profit if only one bet wins      best = profit if both win
-   Kept only if worst >= -MAX_RISK (and worst <= MAX_WORST: bigger means two different bets
-   were matched by mistake).
+   Kept only if worst >= -MAX_RISK, no leg is under MIN_LEG_ODDS (a 1.01 favourite + a long shot
+   isn't a middle) and worst <= MAX_WORST (better means two different bets were matched by mistake).
 4. Chance of landing in the middle, from the books' own prices without their margin (Pinnacle
    when it has both lines, otherwise the other books' average):
        P(middle) = P(over L1) - P(over L2)
        EV = P(under only) * payout + P(middle) * both payouts + P(over only) * payout - stake
+   Kept only if EV >= MIN_EV. The rules are loose on purpose (worst -$6, EV down to -$1) to see
+   how often middles really hit before tightening them; each trade keeps its inputs in "features".
 5. One trade per family per game - the pair with the best EV. Re-checked at the books before
    it is "placed", like arb_bot.
 Half-point lines only (whole lines can push, which this math doesn't cover).
-
-Two tiers of paper trades:
-    qualified   EV >= MIN_EV and worst >= -MAX_RISK, re-checked at the books, notified
-    candidate   the best middles that just miss (EV >= CANDIDATE_MIN_EV, legs' 1/odds adding up to at
-                most CANDIDATE_MAX_IMPLIED = 103%, i.e. a worst case of about -$3),
-                CANDIDATES_PER_SCAN per scan, no re-check and no pop-up - placed to collect data
-                for a model of which middles pay off. Each trade keeps its inputs in "features".
 
 Tracking: before kickoff each leg is re-checked every scan (odds cut / bet pulled / game
 removed or postponed), like the arb bot. After the game it is settled by the final score from
@@ -63,13 +58,10 @@ from arb_bot import match_games, notify, now_utc, oriented, stamp   # shared wit
 
 # --- settings -------------------------------------------------------------
 STAKE = 100
-MAX_RISK = 10.0             # worst case (only one bet wins) may lose at most this many dollars ...
-MIN_EV = 0.5                # ... and only if the expected profit is at least this
+MAX_RISK = 6.0              # worst case (only one bet wins) may lose at most this many dollars
+MIN_EV = -1.0               # expected profit at least this (loose for now, to collect data)
 MAX_RISK_NO_EV = 1.0        # when the chance of the middle can't be estimated: lose at most this
-CANDIDATES_PER_SCAN = 25    # also paper-trade the best middles that just miss, for data ...
-CANDIDATE_MIN_EV = -2.0     # ... expected profit at least this
-CANDIDATE_MAX_IMPLIED = 1.03  # ... legs' implied probabilities (1/odds) add up to at most 103%
-MIN_LEG_ODDS = 1.25         # ... and no lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
+MIN_LEG_ODDS = 1.25         # no lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
 NO_RESULT_HOURS = 24        # no ESPN result this long after kickoff -> "needs result" (manual_results.json)
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
 CUT_FLAG_PTS = 0.08
@@ -85,7 +77,7 @@ CSV_FILE = os.path.join(HERE, "middle_trades.csv")
 DASHBOARD = os.path.join(HERE, "middle_dashboard.html")
 LOG = os.path.join(HERE, "middle_log.txt")
 MANUAL = os.path.join(HERE, "manual_results.json")
-CSV_FIELDS = ["id", "tier", "status", "opened", "sport", "game", "start", "market", "legs", "middle",
+CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "legs", "middle",
               "p_middle_pct", "stake", "worst", "expected", "best", "result", "hit", "profit",
               "flags", "closed", "close_reason", "features"]
 
@@ -149,8 +141,8 @@ def fair_prob(offers_at_line, side):
     return probs.get("Pinnacle", mean(probs.values()))
 
 
-def evaluate(low, high, p1, p2, strict=True):
-    """Middle numbers, or None if it doesn't qualify (strict=False: only the sanity checks)."""
+def evaluate(low, high, p1, p2):
+    """Middle numbers, or None if it doesn't qualify."""
     s_low, s_high = whole_dollar_split(low.odds, high.odds)
     staked = s_low + s_high
     pay_low, pay_high = s_low * low.odds, s_high * high.odds
@@ -158,10 +150,7 @@ def evaluate(low, high, p1, p2, strict=True):
     best = pay_low + pay_high - staked
     if worst > STAKE * MAX_WORST / 100:
         return None
-    if not strict:
-        if min(low.odds, high.odds) < MIN_LEG_ODDS:
-            return None
-    elif worst < -MAX_RISK:
+    if worst < -MAX_RISK or min(low.odds, high.odds) < MIN_LEG_ODDS:
         return None
     n = {"s_low": s_low, "s_high": s_high, "staked": staked, "worst": worst, "best": best,
          "p_middle": None, "expected": None, "p1": p1, "p2": p2}
@@ -169,11 +158,11 @@ def evaluate(low, high, p1, p2, strict=True):
         pm = p1 - p2
         n["p_middle"] = pm
         n["expected"] = (1 - p1) * pay_high + pm * (pay_low + pay_high) + p2 * pay_low - staked
-        return n if n["expected"] >= MIN_EV or not strict else None
-    return n if worst >= -MAX_RISK_NO_EV or not strict else None
+        return n if n["expected"] >= MIN_EV else None
+    return n if worst >= -MAX_RISK_NO_EV else None
 
 
-def find_middles(games, offers_by_event, strict=True):
+def find_middles(games, offers_by_event):
     """Best middle per family per matched game -> list of (game, family, low, high, numbers)."""
     found = []
     for g in games:
@@ -203,7 +192,7 @@ def find_middles(games, offers_by_event, strict=True):
                         continue
                     p1 = fair_prob(at_line[l1], LOW_SIDE[kind])
                     p2 = fair_prob(at_line[l2], LOW_SIDE[kind])
-                    n = evaluate(low, high, p1, p2, strict)
+                    n = evaluate(low, high, p1, p2)
                     if not n:
                         continue
                     rank = (n["expected"] is not None, n["expected"] if n["expected"] is not None else n["worst"])
@@ -281,7 +270,7 @@ def confirm(g, fam, low, high, by_book, probs):
     return (new_low, new_high, n) if n else None
 
 
-def open_trade(g, fam, low, high, n, trades, tier="qualified"):
+def open_trade(g, fam, low, high, n, trades):
     ref = g["ref"]
     kind = fam[3]
     legs = []
@@ -296,8 +285,7 @@ def open_trade(g, fam, low, high, n, trades, tier="qualified"):
                 "low_book": low.book, "high_book": high.book, "p_low_fair": n["p1"], "p_high_fair": n["p2"],
                 "books_on_game": len(g["books"]), "period": fam[0],
                 "scope": "player" if fam[1].startswith("player:") else fam[1], "stat": fam[2], "kind": fam[3]}
-    key = trade_key(g, fam) if tier == "qualified" else f"candidate|{trade_key(g, fam)}"
-    t = {"id": len(trades) + 1, "key": key, "tier": tier, "family": list(fam), "status": "open",
+    t = {"id": len(trades) + 1, "key": trade_key(g, fam), "family": list(fam), "status": "open",
          "opened": stamp(), "sport": ref.sport, "game": f"{ref.home} vs {ref.away}",
          "home": ref.home, "away": ref.away, "start": ref.start.isoformat(),
          "market": family_label(fam, ref.home, ref.away),
@@ -433,8 +421,8 @@ def settle(trades):
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
             "void - stakes back" if value == results.VOID else "one bet won"
-        if t["tier"] == "qualified":
-            notify(f"Middle settled: {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['result']}")
+        if t["hit"]:
+            notify(f"Middle hit! {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['result']}")
 
 
 # --- output ---------------------------------------------------------------
@@ -457,7 +445,7 @@ def write_csv(trades):
         os.remove(tmp)
 
 
-def tier_stats(ts):
+def stats(ts):
     live = [t for t in ts if t["status"] != "void"]
     done = [t for t in live if t["status"] == "settled"]
     with_ev = [t for t in live if t["expected"] is not None]
@@ -470,8 +458,6 @@ def tier_stats(ts):
 
 def write_dashboard(trades, last_scan):
     from html import escape
-    for t in trades:
-        t.setdefault("tier", "qualified")
     void = [t for t in trades if t["status"] == "void"]
     pending = [t for t in trades if t["status"] == "needs result"]
     flagged = sum(bool(t["flags"]) for t in trades if t["status"] != "void")
@@ -495,7 +481,6 @@ def write_dashboard(trades, last_scan):
         return "?" if t["p_middle_pct"] is None else f"{t['p_middle_pct']:.1f}%"
 
     order = {"needs result": 0, "open": 1, "started": 2, "awaiting result": 3, "settled": 4, "void": 5}
-    tier_name = {"qualified": "qualified", "candidate": "close case"}
 
     def tiles(name, st):
         roi = st["earned"] / st["staked_done"] * 100 if st["staked_done"] else 0
@@ -507,7 +492,7 @@ def write_dashboard(trades, last_scan):
                 f'<div class="tile">Expected, still open<b>{money(st["expected_open"])} $</b></div>'
                 f'<div class="tile">Avg. chance of middle<b>{st["avg_pm"]:.1f}%</b></div></div>')
     rows = "".join(
-        f"<tr><td><span class='st'>{escape(t['status'])}</span></td><td>{tier_name.get(t['tier'], t['tier'])}</td>"
+        f"<tr><td><span class='st'>{escape(t['status'])}</span></td>"
         f"<td class='n'>{escape(t['opened'][5:])}</td>"
         f"<td>{escape(t['sport'])}</td><td>{escape(t['game'])}<div class='muted'>"
         f"{datetime.fromisoformat(t['start']).astimezone():%a %d %b %H:%M}</div></td>"
@@ -519,8 +504,7 @@ def write_dashboard(trades, last_scan):
         f"<td class='flags'>{escape(t.get('result') or '')}{'<br>' if t.get('result') else ''}"
         f"{'<br>'.join(escape(f) for f in t['flags'])}"
         f"{'<br>' if t['flags'] and t['close_reason'] else ''}{escape(t['close_reason'])}</td></tr>"
-        for t in sorted(trades, key=lambda t: (t["tier"] != "qualified", order.get(t["status"], 9),
-                                               -(t["expected"] or -99), -t["id"])))
+        for t in sorted(trades, key=lambda t: (order.get(t["status"], 9), -(t["expected"] or -99), -t["id"])))
     page = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="60"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Middle paper trades</title>
@@ -543,18 +527,13 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
 <h1>Middle paper trades</h1>
 <div class="sub">${STAKE} imaginary per middle, whole-dollar stakes · Pinnacle, FanDuel, LeoVegas, BetRivers (Ontario)
  · worst case = only one bet wins, best = both win · last scan {escape(last_scan)} · reloads every minute</div>
-<h2>Qualified</h2>
-<div class="sub">expected profit at least ${MIN_EV:.2f}, worst case at most -${MAX_RISK:.0f}, re-checked at the books</div>
-{tiles("Middles", tier_stats([t for t in trades if t["tier"] == "qualified"]))}
-<h2>Close cases (for data)</h2>
-<div class="sub">the best middles that just miss: expected profit at least ${CANDIDATE_MIN_EV:+.2f}, worst case at most
- about -$3 (total probability of the two legs at most {CANDIDATE_MAX_IMPLIED * 100:.0f}%), legs at {MIN_LEG_ODDS:g}+ odds
- - placed without re-check or pop-up</div>
-{tiles("Close cases", tier_stats([t for t in trades if t["tier"] == "candidate"]))}
+<div class="sub">placed if expected profit is at least ${MIN_EV:+.2f} and the worst case loses at most
+ ${MAX_RISK:.0f} (loose on purpose, to see how often middles hit) · re-checked at the books before placing</div>
+{tiles("Middles", stats(trades))}
 <div class="sub" style="margin-top:12px">Flagged (book may cancel): {flagged} · void: {len(void)}
  · needs a result looked up by hand: {len(pending)}</div>
 <h2>Trades</h2><div class="wrap"><table>
-<tr><th>Status</th><th>Tier</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
+<tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
 <th>Middle if</th><th class="n">Chance</th><th class="n">Total prob.</th><th class="n">Worst $</th>
 <th class="n">Expected $</th><th class="n">Best $</th><th class="n">Profit $</th><th>Result / flags</th></tr>
 {rows}</table></div></body></html>"""
@@ -582,6 +561,9 @@ def configure(out_dir):
 def process(data, trades):
     """One scan's data (from scanner.collect) -> new paper trades, tracking, files. Returns a summary."""
     middles = find_middles(data.games, data.by_event)
+    for t in trades:                       # former "close case" trades are regular trades now
+        t.pop("tier", None)
+        t["key"] = t["key"].removeprefix("candidate|")
     taken = {t["key"] for t in trades}
     new = []
     for g, fam, low, high, n in sorted(middles, key=lambda m: -(m[4]["expected"] or -99)):
@@ -603,26 +585,12 @@ def process(data, trades):
     else:
         for t in new:
             notify(f"Middle placed: {t['middle']} ({t['p_middle_pct'] or '?'}%)", describe(t))
-    # candidates: the best of the rest, placed (unconfirmed, silently) to collect data
-    near = [m for m in find_middles(data.games, data.by_event, strict=False)
-            if m[4]["expected"] is not None and m[4]["expected"] >= CANDIDATE_MIN_EV
-            and 1 / m[2].odds + 1 / m[3].odds <= CANDIDATE_MAX_IMPLIED]
-    placed_candidates = 0
-    for g, fam, low, high, n in sorted(near, key=lambda m: -m[4]["expected"]):
-        if placed_candidates >= CANDIDATES_PER_SCAN:
-            break
-        tk = trade_key(g, fam)
-        if tk in taken or f"candidate|{tk}" in taken:
-            continue
-        taken.add(f"candidate|{tk}")
-        open_trade(g, fam, low, high, n, trades, tier="candidate")
-        placed_candidates += 1
     track(trades, data.events, data.by_event)
     settle(trades)
     save(trades)
     write_csv(trades)
     write_dashboard(trades, stamp())
-    return f"{len(middles)} middles seen, {len(new)} placed, {placed_candidates} candidates placed"
+    return f"{len(middles)} middles seen, {len(new)} placed"
 
 
 def probs_for(g, fam, low, high, by_event):
