@@ -402,12 +402,12 @@ def write_dashboard(trades, last_scan):
 
     order = {"open": 0, "started": 1, "settled": 2, "void": 3}
     rows = "".join(
-        f"<tr><td><span class='st {t['status']}'>{t['status']}</span></td><td>{escape(t['opened'])}</td>"
+        f"<tr><td><span class='st {t['status']}'>{t['status']}</span></td><td class='n'>{escape(t['opened'][5:])}</td>"
         f"<td>{escape(t['sport'])}</td><td>{escape(t['game'])}<div class='muted'>"
         f"{datetime.fromisoformat(t['start']).astimezone():%a %d %b %H:%M}</div></td>"
-        f"<td>{escape(t['market'])}</td><td>{''.join(leg_html(l) for l in t['legs'])}</td>"
-        f"<td>{t['implied_pct']:.2f}%</td><td>${t['stake']}</td><td>${t['payout_min']:.2f}</td>"
-        f"<td>{t['roi_pct']:.2f}%</td><td>{money(t['profit'])}</td>"
+        f"<td>{escape(t['market'])}</td><td class='legs'>{''.join(leg_html(l) for l in t['legs'])}</td>"
+        f"<td class='n'>{t['implied_pct']:.2f}%</td><td class='n'>${t['payout_min']:.2f}</td>"
+        f"<td class='n'>{t['roi_pct']:.2f}%</td><td class='n'>{money(t['profit'])}</td>"
         f"<td class='flags'>{'<br>'.join(escape(f) for f in t['flags']) or ''}"
         f"{'<br>' if t['flags'] and t['close_reason'] else ''}{escape(t['close_reason'])}</td></tr>"
         for t in sorted(trades, key=lambda t: (order[t["status"]], -t["id"])))
@@ -418,13 +418,14 @@ def write_dashboard(trades, last_scan):
 :root {{ --bg:#fff; --fg:#111; --muted:#666; --line:#e4e4e4; --pos:#0a7d32; --neg:#c62828; --warn:#b26a00; --chip:#f1f1f1; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --bg:#161616; --fg:#eee; --muted:#999;
   --line:#333; --pos:#4cc777; --neg:#ff6b6b; --warn:#f0a840; --chip:#2a2a2a; }} }}
-body {{ background:var(--bg); color:var(--fg); font:14px system-ui,sans-serif; margin:24px; }}
+body {{ background:var(--bg); color:var(--fg); font:13px system-ui,sans-serif; margin:14px; }}
 h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:16px; margin:28px 0 8px; }}
 .sub, .muted {{ color:var(--muted); }} .sub {{ margin-bottom:16px; }}
-.tiles {{ display:flex; gap:28px; flex-wrap:wrap; }} .tile b {{ display:block; font-size:22px; }}
-table {{ border-collapse:collapse; width:100%; }} th, td {{ padding:6px 8px; vertical-align:top;
-  border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }}
-th {{ color:var(--muted); font-weight:500; }} td.flags {{ white-space:normal; min-width:220px; color:var(--warn); }}
+.tiles {{ display:flex; gap:22px; flex-wrap:wrap; }} .tile b {{ display:block; font-size:19px; }}
+table {{ border-collapse:collapse; width:100%; font-size:12px; }} th, td {{ padding:3px 5px; vertical-align:top;
+  border-bottom:1px solid var(--line); text-align:left; white-space:normal; }}
+td.n, th.n {{ white-space:nowrap; }} td.legs {{ min-width:230px; }} td.legs div {{ white-space:nowrap; }}
+th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-width:260px; color:var(--warn); }}
 .pos {{ color:var(--pos); }} .neg {{ color:var(--neg); }} .warn {{ color:var(--warn); }}
 .st {{ background:var(--chip); border-radius:4px; padding:1px 6px; }}
 .st.settled {{ color:var(--pos); }} .st.void {{ color:var(--muted); }}
@@ -444,7 +445,7 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ white-space:normal; mi
 </div>
 <h2>Trades</h2><div class="wrap"><table>
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
-<th>Total prob.</th><th>Stake</th><th>Payout</th><th>ROI</th><th>Profit $</th><th>Flags</th></tr>
+<th class="n">Total prob.</th><th class="n">Payout</th><th class="n">ROI</th><th class="n">Profit $</th><th>Flags</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

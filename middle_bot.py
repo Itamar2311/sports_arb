@@ -30,7 +30,8 @@ Half-point lines only (whole lines can push, which this math doesn't cover).
 
 Two tiers of paper trades:
     qualified   EV >= MIN_EV and worst >= -MAX_RISK, re-checked at the books, notified
-    candidate   the best middles that just miss (EV >= CANDIDATE_MIN_EV, worst >= -CANDIDATE_MAX_RISK),
+    candidate   the best middles that just miss (EV >= CANDIDATE_MIN_EV, legs' 1/odds adding up to at
+                most CANDIDATE_MAX_IMPLIED = 103%, i.e. a worst case of about -$3),
                 CANDIDATES_PER_SCAN per scan, no re-check and no pop-up - placed to collect data
                 for a model of which middles pay off. Each trade keeps its inputs in "features".
 
@@ -67,7 +68,7 @@ MIN_EV = 0.5                # ... and only if the expected profit is at least th
 MAX_RISK_NO_EV = 1.0        # when the chance of the middle can't be estimated: lose at most this
 CANDIDATES_PER_SCAN = 25    # also paper-trade the best middles that just miss, for data ...
 CANDIDATE_MIN_EV = -2.0     # ... expected profit at least this
-CANDIDATE_MAX_RISK = 20.0   # ... worst case at most this many dollars lost
+CANDIDATE_MAX_IMPLIED = 1.03  # ... legs' implied probabilities (1/odds) add up to at most 103%
 MIN_LEG_ODDS = 1.25         # ... and no lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
 NO_RESULT_HOURS = 24        # no ESPN result this long after kickoff -> "needs result" (manual_results.json)
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
@@ -487,6 +488,9 @@ def write_dashboard(trades, last_scan):
         return (f"<div{cls}><b>${l['stake']}</b> {escape(l['label'])} @ {l['odds']:g}{now} "
                 f"<span class='muted'>{escape(l['book'])} · {l['prob'] * 100:.1f}%{st}</span></div>")
 
+    def total_prob(t):
+        return f"{sum(l['prob'] for l in t['legs']) * 100:.1f}%"
+
     def chance(t):
         return "?" if t["p_middle_pct"] is None else f"{t['p_middle_pct']:.1f}%"
 
@@ -504,14 +508,14 @@ def write_dashboard(trades, last_scan):
                 f'<div class="tile">Avg. chance of middle<b>{st["avg_pm"]:.1f}%</b></div></div>')
     rows = "".join(
         f"<tr><td><span class='st'>{escape(t['status'])}</span></td><td>{tier_name.get(t['tier'], t['tier'])}</td>"
-        f"<td>{escape(t['opened'])}</td>"
+        f"<td class='n'>{escape(t['opened'][5:])}</td>"
         f"<td>{escape(t['sport'])}</td><td>{escape(t['game'])}<div class='muted'>"
         f"{datetime.fromisoformat(t['start']).astimezone():%a %d %b %H:%M}</div></td>"
-        f"<td>{escape(t['market'])}</td><td>{''.join(leg_html(l) for l in t['legs'])}</td>"
+        f"<td>{escape(t['market'])}</td><td class='legs'>{''.join(leg_html(l) for l in t['legs'])}</td>"
         f"<td>{escape(t['middle'])}</td>"
-        f"<td>{chance(t)}</td>"
-        f"<td>${t['stake']}</td><td>{money(t['worst'])}</td><td>{money(t['expected'])}</td><td>{money(t['best'])}</td>"
-        f"<td>{money(t.get('profit'))}</td>"
+        f"<td class='n'>{chance(t)}</td><td class='n'>{total_prob(t)}</td>"
+        f"<td class='n'>{money(t['worst'])}</td><td class='n'>{money(t['expected'])}</td>"
+        f"<td class='n'>{money(t['best'])}</td><td class='n'>{money(t.get('profit'))}</td>"
         f"<td class='flags'>{escape(t.get('result') or '')}{'<br>' if t.get('result') else ''}"
         f"{'<br>'.join(escape(f) for f in t['flags'])}"
         f"{'<br>' if t['flags'] and t['close_reason'] else ''}{escape(t['close_reason'])}</td></tr>"
@@ -524,13 +528,14 @@ def write_dashboard(trades, last_scan):
 :root {{ --bg:#fff; --fg:#111; --muted:#666; --line:#e4e4e4; --pos:#0a7d32; --neg:#c62828; --warn:#b26a00; --chip:#f1f1f1; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --bg:#161616; --fg:#eee; --muted:#999;
   --line:#333; --pos:#4cc777; --neg:#ff6b6b; --warn:#f0a840; --chip:#2a2a2a; }} }}
-body {{ background:var(--bg); color:var(--fg); font:14px system-ui,sans-serif; margin:24px; }}
+body {{ background:var(--bg); color:var(--fg); font:13px system-ui,sans-serif; margin:14px; }}
 h1 {{ font-size:20px; margin:0 0 4px; }} h2 {{ font-size:16px; margin:28px 0 8px; }}
 .sub, .muted {{ color:var(--muted); }} .sub {{ margin-bottom:16px; }}
-.tiles {{ display:flex; gap:28px; flex-wrap:wrap; }} .tile b {{ display:block; font-size:22px; }}
-table {{ border-collapse:collapse; width:100%; }} th, td {{ padding:6px 8px; vertical-align:top;
-  border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }}
-th {{ color:var(--muted); font-weight:500; }} td.flags {{ white-space:normal; min-width:200px; color:var(--warn); }}
+.tiles {{ display:flex; gap:22px; flex-wrap:wrap; }} .tile b {{ display:block; font-size:19px; }}
+table {{ border-collapse:collapse; width:100%; font-size:12px; }} th, td {{ padding:3px 5px; vertical-align:top;
+  border-bottom:1px solid var(--line); text-align:left; white-space:normal; }}
+td.n, th.n {{ white-space:nowrap; }} td.legs {{ min-width:230px; }} td.legs div {{ white-space:nowrap; }}
+th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-width:260px; color:var(--warn); }}
 .pos {{ color:var(--pos); }} .neg {{ color:var(--neg); }} .warn {{ color:var(--warn); }}
 .st {{ background:var(--chip); border-radius:4px; padding:1px 6px; }}
 .wrap {{ overflow-x:auto; }}
@@ -543,13 +548,15 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ white-space:normal; mi
 {tiles("Middles", tier_stats([t for t in trades if t["tier"] == "qualified"]))}
 <h2>Close cases (for data)</h2>
 <div class="sub">the best middles that just miss: expected profit at least ${CANDIDATE_MIN_EV:+.2f}, worst case at most
- -${CANDIDATE_MAX_RISK:.0f}, legs at {MIN_LEG_ODDS:g}+ odds - placed without re-check or pop-up</div>
+ about -$3 (total probability of the two legs at most {CANDIDATE_MAX_IMPLIED * 100:.0f}%), legs at {MIN_LEG_ODDS:g}+ odds
+ - placed without re-check or pop-up</div>
 {tiles("Close cases", tier_stats([t for t in trades if t["tier"] == "candidate"]))}
 <div class="sub" style="margin-top:12px">Flagged (book may cancel): {flagged} · void: {len(void)}
  · needs a result looked up by hand: {len(pending)}</div>
 <h2>Trades</h2><div class="wrap"><table>
 <tr><th>Status</th><th>Tier</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
-<th>Middle if</th><th>Chance</th><th>Stake</th><th>Worst $</th><th>Expected $</th><th>Best $</th><th>Profit $</th><th>Result / flags</th></tr>
+<th>Middle if</th><th class="n">Chance</th><th class="n">Total prob.</th><th class="n">Worst $</th>
+<th class="n">Expected $</th><th class="n">Best $</th><th class="n">Profit $</th><th>Result / flags</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -599,7 +606,7 @@ def process(data, trades):
     # candidates: the best of the rest, placed (unconfirmed, silently) to collect data
     near = [m for m in find_middles(data.games, data.by_event, strict=False)
             if m[4]["expected"] is not None and m[4]["expected"] >= CANDIDATE_MIN_EV
-            and m[4]["worst"] >= -CANDIDATE_MAX_RISK]
+            and 1 / m[2].odds + 1 / m[3].odds <= CANDIDATE_MAX_IMPLIED]
     placed_candidates = 0
     for g, fam, low, high, n in sorted(near, key=lambda m: -m[4]["expected"]):
         if placed_candidates >= CANDIDATES_PER_SCAN:
