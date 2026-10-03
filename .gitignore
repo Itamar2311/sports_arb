@@ -4,4 +4,8 @@ arb_trades.json
 arb_trades.csv
 arb_dashboard.html
 arb_log.txt
+middle_trades.json
+middle_trades.csv
+middle_dashboard.html
+middle_log.txt
 *.tmp

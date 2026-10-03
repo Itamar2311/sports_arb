@@ -34,19 +34,15 @@ Files:
     arb_log.txt         one line per scan
 A Windows notification pops up for every paper trade placed, flagged, voided or settled.
 
-Run:  python arb_bot.py            scan forever, one scan every CYCLE_MIN minutes
-      python arb_bot.py --once     one scan
+Run through scanner.py, which fetches the books once per scan for this bot and middle_bot:
+      python scanner.py            scan forever        python scanner.py --once     one scan
 """
-import argparse
 import csv
 import json
 import os
 import subprocess
 import sys
-import time
-import traceback
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from itertools import product
 from math import ceil, floor
@@ -58,7 +54,6 @@ from books import OUTCOMES, team_score
 STAKE = 100                 # dollars per arb, split across the legs
 MIN_PROFIT_PCT = 0.3        # after rounding to whole dollars
 MAX_PROFIT_PCT = 8.0        # bigger is almost always two different bets matched by mistake
-CYCLE_MIN = 5
 MATCH_MINUTES = 20          # same game if kickoff times are this close
 CUT_FLAG_PTS = 0.08         # leg's implied probability up 8+ points before kickoff = flag
 POSTPONE_HOURS = 12
@@ -463,24 +458,17 @@ def log(msg):
         f.write(msg + "\n")
 
 
-# --- main -----------------------------------------------------------------
-def scan(book_list, trades):
-    t0 = time.time()
-    books.counts.clear()
-    with ThreadPoolExecutor(len(book_list)) as ex:
-        results = list(ex.map(lambda b: (b, b.scan()), book_list))
-    events, offers, errors = [], [], []
-    for b, (e, o, err) in results:
-        events += e
-        offers += o
-        errors += [f"{b.name} {x}" for x in err]
-    by_event = defaultdict(list)
-    for o in offers:
-        by_event[(o.book, o.event_id)].append(o)
-    games = match_games(events)
-    arbs = find_arbs(games, by_event)
+# --- one scan --------------------------------------------------------------
+def configure(out_dir):
+    """Write this bot's files into out_dir (scanner.py points it at the sports_arb folder)."""
+    global STATE, CSV_FILE, DASHBOARD, LOG
+    STATE, CSV_FILE, DASHBOARD, LOG = (os.path.join(out_dir, f) for f in
+                                       ("arb_trades.json", "arb_trades.csv", "arb_dashboard.html", "arb_log.txt"))
 
-    by_book = {b.name: b for b in book_list}
+
+def process(data, trades):
+    """One scan's data (from scanner.collect) -> new paper trades, tracking, files. Returns a summary."""
+    arbs = find_arbs(data.games, data.by_event)
     taken = {t["key"] for t in trades}
     placed = 0
     for g, key, best, n in sorted(arbs, key=lambda a: -a[3]["profit_pct"]):
@@ -489,40 +477,15 @@ def scan(book_list, trades):
             continue
         taken.add(tk)
         try:
-            ok = confirm(g, key, best, by_book)
+            ok = confirm(g, key, best, data.by_book)
         except Exception as ex:
-            errors.append(f"confirm: {ex}")
+            data.errors.append(f"arb confirm: {ex}")
             continue
         if ok:
             open_trade(g, key, ok[0], ok[1], trades)
             placed += 1
-    track(trades, events, by_event)
+    track(trades, data.events, data.by_event)
     save(trades)
     write_csv(trades)
     write_dashboard(trades, stamp())
-    per_book = ", ".join(f"{b}: {sum(e.book == b for e in events)} games/{sum(o.book == b for o in offers)} bets"
-                         for b in by_book)
-    log(f"{stamp()}  {time.time() - t0:.0f}s  {per_book}  | {len(games)} matched games, "
-        f"{len(arbs)} arbs seen, {placed} placed, requests {dict(books.counts)}"
-        + (f"  | {len(errors)} errors: {errors[:3]}" if errors else ""))
-
-
-def main():
-    p = argparse.ArgumentParser(description="Arbitrage paper trading across Ontario sportsbooks")
-    p.add_argument("--once", action="store_true", help="one scan, then exit")
-    args = p.parse_args()
-    book_list = books.all_books()
-    trades = load()
-    while True:
-        start = time.time()
-        try:
-            scan(book_list, trades)
-        except Exception:
-            log(f"{stamp()}  scan failed:\n{traceback.format_exc()}")
-        if args.once:
-            break
-        time.sleep(max(30, CYCLE_MIN * 60 - (time.time() - start)))
-
-
-if __name__ == "__main__":
-    main()
+    return f"{len(arbs)} arbs seen, {placed} placed"

@@ -188,14 +188,18 @@ def player_stat(text):
 
 
 def game_stat(text):
-    t = text.lower()
+    t = re.sub(r"(including|inc\.?) (overtime|ot|extra innings).*$", "", text.lower())   # "...and Penalty Shootout"
     if re.search(r"odd|even|race|first to|winning margin|bands|exact|correct|both halves|/|&| or more", t):
         return None
     if "corner" in t:
         return "corners"
-    if "booking" in t or "shot" in t or "foul" in t or "save" in t or "ace" in t:
+    # stats that aren't the score: yards, touchdowns, shots... ("Team Total Passing Yards" is not team points)
+    if re.search(r"booking|shot|foul|save|\baces?\b|yard|touchdown|\btds?\b|sack|reception|field goal|"
+                 r"interception|turnover|punt|kick|completion|attempt|fumble|first down|penalt|possession|"
+                 r"timeout|rebound|assist|steal|block|three|strikeout|\bhits?\b|walk|home run|error|"
+                 r"tackle|offside|throw|\btr(y|ies)\b|break point|tiebreak|double fault|checkout|\blegs?\b", t):
         return None
-    if "card" in t:
+    if re.search(r"\bcards?\b", t):
         return "cards"
     if "set handicap" in t or "total sets" in t:
         return "sets"
@@ -369,14 +373,17 @@ KAMBI_ML = ("full time", "match", "moneyline", "match odds", "half time", "1st h
 
 
 def kambi_team(text, ev):
-    m = re.search(r"\bby (.+?)(?: - |$)", text)
-    if not m:
+    m = re.search(r"\bby (.+?)(?: - |$)", text, re.I)        # "Total Corners By Spain - 1st Half"
+    team = m.group(1) if m else text.split(" - ")[-1] if " - " in text else None   # "Total Cards - Spain"
+    if team is None or (not m and period_of(team, "") != "game") or \
+            (not m and re.search(r"overtime|regular|time|half|quarter|period|innings|set", team, re.I)):
         return "game"
-    if same_team(m.group(1), ev["homeName"]):
+    h, a = team_score(team, ev["homeName"]), team_score(team, ev["awayName"])
+    if h > a:
         return "home"
-    if same_team(m.group(1), ev["awayName"]):
+    if a > h:
         return "away"
-    return None
+    return None                    # a team we can't place, or an unknown suffix: skip, don't guess
 
 
 def parse_kambi(book, ev, bet_offers):
@@ -405,7 +412,7 @@ def parse_kambi(book, ev, bet_offers):
             for o in outs:
                 add("game", "main", kind, None, {"OT_ONE": "home", "OT_TWO": "away", "OT_CROSS": "draw"}.get(o["type"]), o)
         elif typ in ("Over/Under", "Asian Over/Under"):
-            scope, stat = kambi_team(label, ev), game_stat(label.split(" by ")[0])
+            scope, stat = kambi_team(label, ev), game_stat(re.split(r" by ", label, flags=re.I)[0])
             if stat == "main" and not re.search(r"total (goals|points|runs|games)|asian total|^total$", low):
                 continue
             for o in outs:
