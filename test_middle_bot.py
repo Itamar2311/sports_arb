@@ -67,5 +67,62 @@ class MiddleMath(unittest.TestCase):
         self.assertEqual(m.middle_label("ou", 2.5, 3.5, "H"), "result 3")
 
 
+class FakeGame:
+    completed, cancelled, detail = True, False, "Final"
+
+    def __init__(self, value):
+        self.v = value
+
+    def value(self, period, scope, stat, kind):
+        return self.v
+
+    def summary(self):
+        return "fake final"
+
+
+def settled_trade(kind, legs, value, monkey_id=None):
+    """A finished middle with the given legs [(outcome, line, odds, stake)], settled against `value`."""
+    t = {"id": 1, "tier": "qualified", "status": "awaiting result", "sport": "baseball", "home": "H", "away": "A",
+         "start": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(), "family": ["game", "game", "main", kind],
+         "game": "H vs A", "market": "spread", "stake": sum(l[3] for l in legs), "flags": [],
+         "legs": [{"outcome": o, "line": li, "odds": od, "stake": st} for o, li, od, st in legs]}
+    old_find, old_notify = m.results.find_game, m.notify
+    m.results.find_game = lambda *a: FakeGame(value)
+    m.notify = lambda *a: None
+    try:
+        m.settle([t])
+    finally:
+        m.results.find_game, m.notify = old_find, old_notify
+    return t
+
+
+class Settling(unittest.TestCase):
+    BREWERS = [("home", -1.5, 2.5, 37), ("away", -2.5, 1.4878, 63)]   # Brewers -1.5 + Padres +2.5
+
+    def test_spread_middle_hits_on_margin_two(self):
+        t = settled_trade("hcp", self.BREWERS, 2)
+        self.assertTrue(t["hit"])
+        self.assertAlmostEqual(t["profit"], 37 * 2.5 + 63 * 1.4878 - 100, places=2)
+
+    def test_spread_middle_misses(self):
+        t = settled_trade("hcp", self.BREWERS, 4)            # Brewers by 4: only the -1.5 wins
+        self.assertEqual([l["result"] for l in t["legs"]], ["win", "lose"])
+        self.assertAlmostEqual(t["profit"], 37 * 2.5 - 100, places=2)
+        t = settled_trade("hcp", self.BREWERS, -3)           # Padres win: only the +2.5 wins
+        self.assertEqual([l["result"] for l in t["legs"]], ["lose", "win"])
+
+    def test_total_and_void(self):
+        legs = [("over", 19.5, 1.91, 50), ("under", 21.5, 1.91, 50)]
+        self.assertTrue(settled_trade("ou", legs, 21)["hit"])
+        self.assertFalse(settled_trade("ou", legs, 25)["hit"])
+        t = settled_trade("ou", legs, m.results.VOID)        # player didn't play
+        self.assertEqual((t["profit"], t["close_reason"]), (0.0, "void - stakes back"))
+
+    def test_not_found_waits_then_needs_result(self):
+        legs = [("over", 19.5, 1.91, 50), ("under", 21.5, 1.91, 50)]
+        t = settled_trade("ou", legs, None)
+        self.assertEqual(t["status"], "awaiting result")      # 5h after kickoff: keep waiting
+
+
 if __name__ == "__main__":
     unittest.main()

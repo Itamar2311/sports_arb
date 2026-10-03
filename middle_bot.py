@@ -27,12 +27,21 @@ Every scan:
 5. One trade per family per game - the pair with the best EV. Re-checked at the books before
    it is "placed", like arb_bot.
 Half-point lines only (whole lines can push, which this math doesn't cover).
-The dashboard also lists the closest candidates of the latest scan - the best middle per
-family by expected profit, placed or not - to show how near the books come.
+
+Two tiers of paper trades:
+    qualified   EV >= MIN_EV and worst >= -MAX_RISK, re-checked at the books, notified
+    candidate   the best middles that just miss (EV >= CANDIDATE_MIN_EV, worst >= -CANDIDATE_MAX_RISK),
+                CANDIDATES_PER_SCAN per scan, no re-check and no pop-up - placed to collect data
+                for a model of which middles pay off. Each trade keeps its inputs in "features".
 
 Tracking: before kickoff each leg is re-checked every scan (odds cut / bet pulled / game
-removed or postponed), like the arb bot. After the game the trade waits for the result:
-settling by the final score is not built yet, so profit is shown as worst / expected / best.
+removed or postponed), like the arb bot. After the game it is settled by the final score from
+ESPN (results.py): each leg wins, loses or is void (player didn't play -> stake back). Games
+ESPN doesn't cover (tennis, darts, esports, small leagues...) become "needs result" after
+NO_RESULT_HOURS; their result can be looked up by hand and put in manual_results.json:
+    {"12": 7, "15": "void"}     trade id -> the number the bet settles on (total, home margin
+                                for a spread, or player stat), or "void"
+and the next scan settles them.
 
 Files: middle_trades.json (source of truth), middle_trades.csv, middle_dashboard.html, middle_log.txt
 Run through scanner.py, which fetches the books once per scan for this bot and arb_bot:
@@ -48,6 +57,7 @@ from math import ceil, floor
 from statistics import mean
 
 import books
+import results
 from arb_bot import match_games, notify, now_utc, oriented, stamp   # shared with the arb bot
 
 # --- settings -------------------------------------------------------------
@@ -55,8 +65,11 @@ STAKE = 100
 MAX_RISK = 10.0             # worst case (only one bet wins) may lose at most this many dollars ...
 MIN_EV = 0.5                # ... and only if the expected profit is at least this
 MAX_RISK_NO_EV = 1.0        # when the chance of the middle can't be estimated: lose at most this
-SHOW_CANDIDATES = 25        # dashboard also lists the best middles that didn't qualify ...
-MIN_LEG_ODDS = 1.25         # ... skipping lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
+CANDIDATES_PER_SCAN = 25    # also paper-trade the best middles that just miss, for data ...
+CANDIDATE_MIN_EV = -2.0     # ... expected profit at least this
+CANDIDATE_MAX_RISK = 20.0   # ... worst case at most this many dollars lost
+MIN_LEG_ODDS = 1.25         # ... and no lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
+NO_RESULT_HOURS = 24        # no ESPN result this long after kickoff -> "needs result" (manual_results.json)
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
 CUT_FLAG_PTS = 0.08
 POSTPONE_HOURS = 12
@@ -70,8 +83,10 @@ STATE = os.path.join(HERE, "middle_trades.json")
 CSV_FILE = os.path.join(HERE, "middle_trades.csv")
 DASHBOARD = os.path.join(HERE, "middle_dashboard.html")
 LOG = os.path.join(HERE, "middle_log.txt")
-CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "legs", "middle",
-              "p_middle_pct", "stake", "worst", "expected", "best", "flags", "closed", "close_reason"]
+MANUAL = os.path.join(HERE, "manual_results.json")
+CSV_FIELDS = ["id", "tier", "status", "opened", "sport", "game", "start", "market", "legs", "middle",
+              "p_middle_pct", "stake", "worst", "expected", "best", "result", "hit", "profit",
+              "flags", "closed", "close_reason", "features"]
 
 PERIOD_NAMES = {"game": "", "reg": "regulation", "h1": "1st half", "h2": "2nd half", "f5": "first 5 innings",
                 "f3": "first 3 innings", "f7": "first 7 innings"}
@@ -148,7 +163,7 @@ def evaluate(low, high, p1, p2, strict=True):
     elif worst < -MAX_RISK:
         return None
     n = {"s_low": s_low, "s_high": s_high, "staked": staked, "worst": worst, "best": best,
-         "p_middle": None, "expected": None}
+         "p_middle": None, "expected": None, "p1": p1, "p2": p2}
     if p1 is not None and p2 is not None and p1 > p2:
         pm = p1 - p2
         n["p_middle"] = pm
@@ -265,7 +280,7 @@ def confirm(g, fam, low, high, by_book, probs):
     return (new_low, new_high, n) if n else None
 
 
-def open_trade(g, fam, low, high, n, trades):
+def open_trade(g, fam, low, high, n, trades, tier="qualified"):
     ref = g["ref"]
     kind = fam[3]
     legs = []
@@ -275,7 +290,13 @@ def open_trade(g, fam, low, high, n, trades):
                      "line": leg.line, "label": side_label(kind, leg.outcome, leg.line, ref.home, ref.away),
                      "ref": leg.ref, "odds": leg.odds, "prob": round(1 / leg.odds, 4), "stake": stake,
                      "payout": round(stake * leg.odds, 2), "now_odds": leg.odds, "status": "ok"})
-    t = {"id": len(trades) + 1, "key": trade_key(g, fam), "family": list(fam), "status": "open",
+    features = {"hours_to_start": round((ref.start - now_utc()).total_seconds() / 3600, 2),
+                "line_gap": abs(high.line - low.line), "low_odds": low.odds, "high_odds": high.odds,
+                "low_book": low.book, "high_book": high.book, "p_low_fair": n["p1"], "p_high_fair": n["p2"],
+                "books_on_game": len(g["books"]), "period": fam[0],
+                "scope": "player" if fam[1].startswith("player:") else fam[1], "stat": fam[2], "kind": fam[3]}
+    key = trade_key(g, fam) if tier == "qualified" else f"candidate|{trade_key(g, fam)}"
+    t = {"id": len(trades) + 1, "key": key, "tier": tier, "family": list(fam), "status": "open",
          "opened": stamp(), "sport": ref.sport, "game": f"{ref.home} vs {ref.away}",
          "home": ref.home, "away": ref.away, "start": ref.start.isoformat(),
          "market": family_label(fam, ref.home, ref.away),
@@ -283,7 +304,8 @@ def open_trade(g, fam, low, high, n, trades):
          "p_middle_pct": None if n["p_middle"] is None else round(n["p_middle"] * 100, 1),
          "stake": n["staked"], "worst": round(n["worst"], 2), "best": round(n["best"], 2),
          "expected": None if n["expected"] is None else round(n["expected"], 2),
-         "flags": [], "closed": "", "close_reason": "", "missing_runs": 0}
+         "flags": [], "closed": "", "close_reason": "", "missing_runs": 0,
+         "result": "", "hit": None, "profit": None, "features": features}
     trades.append(t)
     return t
 
@@ -354,6 +376,66 @@ def track(trades, events, offers_by_event):
             t["status"], t["closed"], t["close_reason"] = "awaiting result", stamp(), "game over - result not settled yet"
 
 
+def manual_results():
+    """{trade id: value} typed in by hand for games ESPN doesn't cover."""
+    try:
+        with open(MANUAL, encoding="utf-8") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def settle(trades):
+    """Settle finished middles by the final score (ESPN, or manual_results.json)."""
+    now = now_utc()
+    manual = manual_results()
+    for t in trades:
+        if t["status"] not in ("awaiting result", "needs result"):
+            continue
+        start = datetime.fromisoformat(t["start"])
+        period, scope, stat, kind = t["family"]
+        game = None
+        if t["id"] in manual:
+            value = manual[t["id"]]
+            value = results.VOID if str(value).lower() == "void" else value
+            summary = "result entered by hand"
+        else:
+            try:
+                game = results.find_game(t["sport"], t["home"], t["away"], start)
+            except Exception:
+                game = None
+            if game and game.cancelled:
+                t["status"], t["closed"], t["profit"], t["hit"] = "void", stamp(), 0.0, None
+                t["close_reason"] = f"game {game.detail.lower()} - bets void, stakes back"
+                continue
+            value = game.value(period, scope, stat, kind) if game and game.completed else None
+            summary = game.summary() if game else ""
+        if value is None:
+            if t["status"] == "awaiting result" and now > start + timedelta(hours=NO_RESULT_HOURS):
+                t["status"] = "needs result"
+                t["close_reason"] = ("ESPN has the game but not this stat" if game else
+                                     "not on ESPN") + " - look it up and add it to manual_results.json"
+            continue
+        payout = 0.0
+        for l in t["legs"]:
+            if value == results.VOID:
+                l["result"] = "void"
+            elif kind == "ou":
+                l["result"] = "win" if (value > l["line"]) == (l["outcome"] == "over") else "lose"
+            else:   # spread: value = home margin; home covers if margin + line > 0, away if margin + line < 0
+                l["result"] = "win" if (value + l["line"] > 0) == (l["outcome"] == "home") else "lose"
+            payout += l["stake"] * l["odds"] if l["result"] == "win" else l["stake"] if l["result"] == "void" else 0
+        t["profit"] = round(payout - t["stake"], 2)
+        t["hit"] = all(l["result"] == "win" for l in t["legs"])
+        shown = "didn't play" if value == results.VOID else (f"margin {value:+d}" if kind == "hcp" else f"{value}")
+        t["result"] = f"{summary} -> {shown}"
+        t["status"], t["closed"] = "settled", stamp()
+        t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
+            "void - stakes back" if value == results.VOID else "one bet won"
+        if t["tier"] == "qualified":
+            notify(f"Middle settled: {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['result']}")
+
+
 # --- output ---------------------------------------------------------------
 def write_csv(trades):
     rows = []
@@ -361,6 +443,7 @@ def write_csv(trades):
         r = {k: t.get(k, "") for k in CSV_FIELDS}
         r["legs"] = " | ".join(f"${l['stake']} {l['label']} @ {l['odds']:g} {l['book']} ({l['status']})" for l in t["legs"])
         r["flags"] = " | ".join(t["flags"])
+        r["features"] = json.dumps(t.get("features", {}))
         rows.append(r)
     tmp = CSV_FILE + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8") as f:
@@ -373,29 +456,24 @@ def write_csv(trades):
         os.remove(tmp)
 
 
-def candidate_row(g, fam, low, high, n):
-    ref = g["ref"]
-    kind = fam[3]
-    return {"sport": ref.sport, "game": f"{ref.home} vs {ref.away}", "start": ref.start.isoformat(),
-            "market": family_label(fam, ref.home, ref.away),
-            "middle": middle_label(kind, low.line, high.line, ref.home),
-            "legs": [{"stake": st, "label": side_label(kind, x.outcome, x.line, ref.home, ref.away),
-                      "odds": x.odds, "book": x.book, "prob": 1 / x.odds}
-                     for x, st in ((low, n["s_low"]), (high, n["s_high"]))],
-            "p_middle_pct": n["p_middle"] * 100, "worst": n["worst"], "expected": n["expected"], "best": n["best"]}
-
-
-def write_dashboard(trades, last_scan, near=()):
-    from html import escape
-    live = [t for t in trades if t["status"] != "void"]
-    void = [t for t in trades if t["status"] == "void"]
-    staked = sum(t["stake"] for t in live)
+def tier_stats(ts):
+    live = [t for t in ts if t["status"] != "void"]
+    done = [t for t in live if t["status"] == "settled"]
     with_ev = [t for t in live if t["expected"] is not None]
-    exp = sum(t["expected"] for t in with_ev)
-    worst = sum(t["worst"] for t in live)
-    free = sum(t["worst"] >= 0 for t in live)
-    avg_pm = mean(t["p_middle_pct"] for t in with_ev) if with_ev else 0
-    flagged = sum(bool(t["flags"]) for t in live)
+    return {"n": len(live), "settled": len(done), "hit": sum(bool(t["hit"]) for t in done),
+            "earned": sum(t["profit"] for t in done), "staked_done": sum(t["stake"] for t in done),
+            "expected_open": sum(t["expected"] for t in with_ev if t["status"] != "settled"),
+            "avg_pm": mean(t["p_middle_pct"] for t in with_ev) if with_ev else 0,
+            "expected_done": sum(t["expected"] or 0 for t in done)}
+
+
+def write_dashboard(trades, last_scan):
+    from html import escape
+    for t in trades:
+        t.setdefault("tier", "qualified")
+    void = [t for t in trades if t["status"] == "void"]
+    pending = [t for t in trades if t["status"] == "needs result"]
+    flagged = sum(bool(t["flags"]) for t in trades if t["status"] != "void")
 
     def money(x):
         if x is None:
@@ -412,27 +490,33 @@ def write_dashboard(trades, last_scan, near=()):
     def chance(t):
         return "?" if t["p_middle_pct"] is None else f"{t['p_middle_pct']:.1f}%"
 
-    order = {"open": 0, "started": 1, "awaiting result": 2, "void": 3}
-    near_rows = "".join(
-        f"<tr><td>{escape(c['sport'])}</td><td>{escape(c['game'])}<div class='muted'>"
-        f"{datetime.fromisoformat(c['start']).astimezone():%a %d %b %H:%M}</div></td>"
-        f"<td>{escape(c['market'])}</td><td>" +
-        "".join(f"<div><b>${l['stake']}</b> {escape(l['label'])} @ {l['odds']:g} "
-                f"<span class='muted'>{escape(l['book'])} · {l['prob'] * 100:.1f}%</span></div>" for l in c["legs"]) +
-        f"</td><td>{escape(c['middle'])}</td><td>{c['p_middle_pct']:.1f}%</td><td>{money(c['worst'])}</td>"
-        f"<td>{money(c['expected'])}</td><td>{money(c['best'])}</td></tr>" for c in near) \
-        or "<tr><td colspan='9' class='muted'>none</td></tr>"
+    order = {"needs result": 0, "open": 1, "started": 2, "awaiting result": 3, "settled": 4, "void": 5}
+    tier_name = {"qualified": "qualified", "candidate": "close case"}
+
+    def tiles(name, st):
+        roi = st["earned"] / st["staked_done"] * 100 if st["staked_done"] else 0
+        return (f'<div class="tiles"><div class="tile">{name}<b>{st["n"]}</b></div>'
+                f'<div class="tile">Money earned (settled)<b>{money(st["earned"])} $</b></div>'
+                f'<div class="tile">ROI settled<b>{roi:+.1f}%</b></div>'
+                f'<div class="tile">Middles hit / settled<b>{st["hit"]} / {st["settled"]}</b></div>'
+                f'<div class="tile">Expected on settled<b>{money(st["expected_done"])} $</b></div>'
+                f'<div class="tile">Expected, still open<b>{money(st["expected_open"])} $</b></div>'
+                f'<div class="tile">Avg. chance of middle<b>{st["avg_pm"]:.1f}%</b></div></div>')
     rows = "".join(
-        f"<tr><td><span class='st'>{escape(t['status'])}</span></td><td>{escape(t['opened'])}</td>"
+        f"<tr><td><span class='st'>{escape(t['status'])}</span></td><td>{tier_name.get(t['tier'], t['tier'])}</td>"
+        f"<td>{escape(t['opened'])}</td>"
         f"<td>{escape(t['sport'])}</td><td>{escape(t['game'])}<div class='muted'>"
         f"{datetime.fromisoformat(t['start']).astimezone():%a %d %b %H:%M}</div></td>"
         f"<td>{escape(t['market'])}</td><td>{''.join(leg_html(l) for l in t['legs'])}</td>"
         f"<td>{escape(t['middle'])}</td>"
         f"<td>{chance(t)}</td>"
         f"<td>${t['stake']}</td><td>{money(t['worst'])}</td><td>{money(t['expected'])}</td><td>{money(t['best'])}</td>"
-        f"<td class='flags'>{'<br>'.join(escape(f) for f in t['flags'])}"
+        f"<td>{money(t.get('profit'))}</td>"
+        f"<td class='flags'>{escape(t.get('result') or '')}{'<br>' if t.get('result') else ''}"
+        f"{'<br>'.join(escape(f) for f in t['flags'])}"
         f"{'<br>' if t['flags'] and t['close_reason'] else ''}{escape(t['close_reason'])}</td></tr>"
-        for t in sorted(trades, key=lambda t: (order.get(t["status"], 9), -(t["expected"] or -99), -t["id"])))
+        for t in sorted(trades, key=lambda t: (t["tier"] != "qualified", order.get(t["status"], 9),
+                                               -(t["expected"] or -99), -t["id"])))
     page = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta http-equiv="refresh" content="60"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Middle paper trades</title>
@@ -454,27 +538,19 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ white-space:normal; mi
 <h1>Middle paper trades</h1>
 <div class="sub">${STAKE} imaginary per middle, whole-dollar stakes · Pinnacle, FanDuel, LeoVegas, BetRivers (Ontario)
  · worst case = only one bet wins, best = both win · last scan {escape(last_scan)} · reloads every minute</div>
-<div class="tiles">
- <div class="tile">Middles<b>{len(live)}</b></div>
- <div class="tile">Staked<b>${staked:,.0f}</b></div>
- <div class="tile">Expected profit<b>{money(exp)} $</b></div>
- <div class="tile">Worst case (no middle hits)<b>{money(worst)} $</b></div>
- <div class="tile">Avg. chance of middle<b>{avg_pm:.1f}%</b></div>
- <div class="tile">Free middles (can't lose)<b>{free}</b></div>
- <div class="tile">Flagged / void<b>{flagged} / {len(void)}</b></div>
-</div>
+<h2>Qualified</h2>
+<div class="sub">expected profit at least ${MIN_EV:.2f}, worst case at most -${MAX_RISK:.0f}, re-checked at the books</div>
+{tiles("Middles", tier_stats([t for t in trades if t["tier"] == "qualified"]))}
+<h2>Close cases (for data)</h2>
+<div class="sub">the best middles that just miss: expected profit at least ${CANDIDATE_MIN_EV:+.2f}, worst case at most
+ -${CANDIDATE_MAX_RISK:.0f}, legs at {MIN_LEG_ODDS:g}+ odds - placed without re-check or pop-up</div>
+{tiles("Close cases", tier_stats([t for t in trades if t["tier"] == "candidate"]))}
+<div class="sub" style="margin-top:12px">Flagged (book may cancel): {flagged} · void: {len(void)}
+ · needs a result looked up by hand: {len(pending)}</div>
 <h2>Trades</h2><div class="wrap"><table>
-<tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
-<th>Middle if</th><th>Chance</th><th>Stake</th><th>Worst $</th><th>Expected $</th><th>Best $</th><th>Flags</th></tr>
-{rows}</table></div>
-<h2>Closest candidates this scan (not placed)</h2>
-<div class="sub">The best middle per bet family at every book right now, by expected profit - placed only if
- expected profit is at least ${MIN_EV:.2f} and the worst case loses at most ${MAX_RISK:.0f}.
- Pairs with a leg under {MIN_LEG_ODDS:g} odds are left out.</div>
-<div class="wrap"><table>
-<tr><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
-<th>Middle if</th><th>Chance</th><th>Worst $</th><th>Expected $</th><th>Best $</th></tr>
-{near_rows}</table></div></body></html>"""
+<tr><th>Status</th><th>Tier</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
+<th>Middle if</th><th>Chance</th><th>Stake</th><th>Worst $</th><th>Expected $</th><th>Best $</th><th>Profit $</th><th>Result / flags</th></tr>
+{rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(page)
@@ -490,17 +566,15 @@ def log(msg):
 # --- one scan --------------------------------------------------------------
 def configure(out_dir):
     """Write this bot's files into out_dir (scanner.py points it at the middle_trades folder)."""
-    global STATE, CSV_FILE, DASHBOARD, LOG
-    STATE, CSV_FILE, DASHBOARD, LOG = (os.path.join(out_dir, f) for f in
-                                       ("middle_trades.json", "middle_trades.csv", "middle_dashboard.html",
-                                        "middle_log.txt"))
+    global STATE, CSV_FILE, DASHBOARD, LOG, MANUAL
+    STATE, CSV_FILE, DASHBOARD, LOG, MANUAL = (os.path.join(out_dir, f) for f in
+                                               ("middle_trades.json", "middle_trades.csv", "middle_dashboard.html",
+                                                "middle_log.txt", "manual_results.json"))
 
 
 def process(data, trades):
     """One scan's data (from scanner.collect) -> new paper trades, tracking, files. Returns a summary."""
     middles = find_middles(data.games, data.by_event)
-    near = [m for m in find_middles(data.games, data.by_event, strict=False) if m[4]["expected"] is not None]
-    near = [candidate_row(*m) for m in sorted(near, key=lambda m: -m[4]["expected"])[:SHOW_CANDIDATES]]
     taken = {t["key"] for t in trades}
     new = []
     for g, fam, low, high, n in sorted(middles, key=lambda m: -(m[4]["expected"] or -99)):
@@ -522,11 +596,26 @@ def process(data, trades):
     else:
         for t in new:
             notify(f"Middle placed: {t['middle']} ({t['p_middle_pct'] or '?'}%)", describe(t))
+    # candidates: the best of the rest, placed (unconfirmed, silently) to collect data
+    near = [m for m in find_middles(data.games, data.by_event, strict=False)
+            if m[4]["expected"] is not None and m[4]["expected"] >= CANDIDATE_MIN_EV
+            and m[4]["worst"] >= -CANDIDATE_MAX_RISK]
+    placed_candidates = 0
+    for g, fam, low, high, n in sorted(near, key=lambda m: -m[4]["expected"]):
+        if placed_candidates >= CANDIDATES_PER_SCAN:
+            break
+        tk = trade_key(g, fam)
+        if tk in taken or f"candidate|{tk}" in taken:
+            continue
+        taken.add(f"candidate|{tk}")
+        open_trade(g, fam, low, high, n, trades, tier="candidate")
+        placed_candidates += 1
     track(trades, data.events, data.by_event)
+    settle(trades)
     save(trades)
     write_csv(trades)
-    write_dashboard(trades, stamp(), near)
-    return f"{len(middles)} middles seen, {len(new)} placed"
+    write_dashboard(trades, stamp())
+    return f"{len(middles)} middles seen, {len(new)} placed, {placed_candidates} candidates placed"
 
 
 def probs_for(g, fam, low, high, by_event):
