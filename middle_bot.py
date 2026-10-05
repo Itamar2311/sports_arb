@@ -78,7 +78,7 @@ DASHBOARD = os.path.join(HERE, "middle_dashboard.html")
 LOG = os.path.join(HERE, "middle_log.txt")
 MANUAL = os.path.join(HERE, "manual_results.json")
 CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "legs", "middle",
-              "p_middle_pct", "stake", "worst", "expected", "best", "result", "hit", "profit",
+              "p_middle_pct", "stake", "worst", "expected", "best", "result", "result_value", "hit", "profit",
               "flags", "closed", "close_reason", "features"]
 
 PERIOD_NAMES = {"game": "", "reg": "regulation", "h1": "1st half", "h2": "2nd half", "f5": "first 5 innings",
@@ -437,6 +437,7 @@ def settle(trades):
         t["profit"] = round(payout - t["stake"], 2)
         t["hit"] = all(l["result"] == "win" for l in t["legs"])
         t["result"] = result_text(t, value, game)
+        t["result_value"] = value              # the one number the bet settled on (or "void")
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
             "void - stakes back" if value == results.VOID else "one bet won"
@@ -493,6 +494,15 @@ def write_dashboard(trades, last_scan):
         return (f"<div{cls}><b>${l['stake']}</b> {escape(l['label'])} @ {l['odds']:g}{now} "
                 f"<span class='muted'>{escape(l['book'])} · {l['prob'] * 100:.1f}%{st}</span></div>")
 
+    def result_cell(t):
+        v = t.get("result_value")
+        if v is None:
+            return ""
+        if v == results.VOID:
+            return "void"
+        cls = "pos" if t.get("hit") else ""
+        return f"<b class='{cls}'>{v:+d}</b>" if t["family"][3] == "hcp" else f"<b class='{cls}'>{v}</b>"
+
     def total_prob(t):
         return f"{sum(l['prob'] for l in t['legs']) * 100:.1f}%"
 
@@ -519,9 +529,9 @@ def write_dashboard(trades, last_scan):
         f"<td>{escape(t['middle'])}</td>"
         f"<td class='n'>{chance(t)}</td><td class='n'>{total_prob(t)}</td>"
         f"<td class='n'>{money(t['worst'])}</td><td class='n'>{money(t['expected'])}</td>"
-        f"<td class='n'>{money(t['best'])}</td><td class='n'>{money(t.get('profit'))}</td>"
-        f"<td class='flags'>{escape(t.get('result') or '')}{'<br>' if t.get('result') else ''}"
-        f"{'<br>'.join(escape(f) for f in t['flags'])}"
+        f"<td class='n'>{money(t['best'])}</td><td class='n'>{result_cell(t)}</td>"
+        f"<td class='n'>{money(t.get('profit'))}</td>"
+        f"<td class='flags' title='{escape(t.get('result') or '')}'>{'<br>'.join(escape(f) for f in t['flags'])}"
         f"{'<br>' if t['flags'] and t['close_reason'] else ''}{escape(t['close_reason'])}</td></tr>"
         for t in sorted(trades, key=lambda t: (order.get(t["status"], 9), -(t["expected"] or -99), -t["id"])))
     page = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -554,7 +564,8 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
 <h2>Trades</h2><div class="wrap"><table>
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
 <th>Middle if</th><th class="n">Chance</th><th class="n">Total prob.</th><th class="n">Worst $</th>
-<th class="n">Expected $</th><th class="n">Best $</th><th class="n">Profit $</th><th>Result / flags</th></tr>
+<th class="n">Expected $</th><th class="n">Best $</th><th class="n" title="the number the bet settled on: the stat or total, or the home team's margin for a spread">Result</th>
+<th class="n">Profit $</th><th>Notes</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
