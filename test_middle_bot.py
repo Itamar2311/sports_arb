@@ -79,6 +79,9 @@ class FakeGame:
     def summary(self):
         return "fake final"
 
+    def score_text(self):
+        return "5-3"
+
 
 def settled_trade(kind, legs, value, monkey_id=None):
     """A finished middle with the given legs [(outcome, line, odds, stake)], settled against `value`."""

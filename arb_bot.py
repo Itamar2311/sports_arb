@@ -72,7 +72,7 @@ CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "leg
 PERIOD_NAMES = {"game": "", "reg": "regulation", "h1": "1st half", "h2": "2nd half", "f5": "first 5 innings",
                 "f3": "first 3 innings", "f7": "first 7 innings"}
 STAT_NAMES = {"main": "", "corners": "corners", "cards": "cards", "sets": "sets", "btts": "both teams to score",
-              "pra": "pts+reb+ast", "hrr": "hits+runs+RBIs", "sb": "stolen bases", "hr": "home runs",
+              "pra": "pts+reb+ast", "pr": "pts+reb", "pa": "pts+ast", "ra": "reb+ast", "hrr": "hits+runs+RBIs", "sb": "stolen bases", "hr": "home runs",
               "tb": "total bases", "rbi": "RBIs", "k": "strikeouts", "outs": "outs", "hits": "hits",
               "runs": "runs", "threes": "threes", "rebounds": "rebounds", "assists": "assists",
               "points": "points", "sog": "shots on goal", "sot": "shots on target", "shots": "shots",

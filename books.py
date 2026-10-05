@@ -163,9 +163,14 @@ def period_of(text, sport):
     return "game"
 
 
+# basketball combined stats ("Points & Assists by the Player") - checked before the single stats,
+# or "Points + Assists 27.5" would be read as assists 27.5
+BASKETBALL_PARTS = (("points", r"\bpoints?\b|\bpts\b"), ("rebounds", r"\brebounds?\b|\brebs?\b"),
+                    ("assists", r"\bassists?\b|\basts?\b"))
+COMBOS = {frozenset({"points", "rebounds"}): "pr", frozenset({"points", "assists"}): "pa",
+          frozenset({"rebounds", "assists"}): "ra", frozenset({"points", "rebounds", "assists"}): "pra"}
 # player stat words, most specific first
 PLAYER_STATS = [
-    (r"pts ?& ?rebs ?& ?asts|points,? rebounds,? (&|and) assists|points \+ rebounds \+ assists", "pra"),
     (r"hits,? runs,? ?(&|and|\+) ?rbis|hits \+ runs \+ rbis", "hrr"),
     (r"stolen base", "sb"), (r"home run", "hr"), (r"total bases|bases recorded", "tb"),
     (r"\brbi", "rbi"), (r"strikeout", "k"), (r"outs recorded", "outs"), (r"\bhits?\b", "hits"),
@@ -181,6 +186,10 @@ def player_stat(text):
     t = text.lower()
     if re.search(PLAYER_SKIP, t):
         return None
+    no_threes = re.sub(r"three[- ]point", "", t)          # "Three-Point Field Goals" isn't points
+    parts = frozenset(name for name, pattern in BASKETBALL_PARTS if re.search(pattern, no_threes))
+    if len(parts) >= 2:
+        return COMBOS[parts]
     for pattern, key in PLAYER_STATS:
         if re.search(pattern, t):
             return key

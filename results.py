@@ -32,7 +32,7 @@ LEAGUES = {"hockey": ["hockey/nhl"],
 QUERY = {"football/college-football": "&groups=80", "basketball/mens-college-basketball": "&groups=50"}
 PLAYER_STATS = {   # our stat -> ESPN box-score columns that add up to it
     "basketball": {"points": ["PTS"], "rebounds": ["REB"], "assists": ["AST"], "threes": ["3PT"],
-                   "pra": ["PTS", "REB", "AST"]},
+                   "pra": ["PTS", "REB", "AST"], "pr": ["PTS", "REB"], "pa": ["PTS", "AST"], "ra": ["REB", "AST"]},
     "hockey": {"goals": ["G"], "assists": ["A"], "points": ["G", "A"], "sog": ["SOG"], "saves": ["SV"]},
     "baseball": {"hits": ["H"], "runs": ["R"], "rbi": ["RBI"], "hr": ["HR"], "hrr": ["H", "R", "RBI"], "k": ["K"]},
 }
@@ -105,6 +105,10 @@ class Game:
     def summary(self):
         return f"{self.teams['home']['team']['displayName']} {self.teams['home'].get('score')}-" \
                f"{self.teams['away'].get('score')} {self.teams['away']['team']['displayName']} ({self.detail})"
+
+    def score_text(self):
+        """Final score as the trade's home-away, e.g. "71-60"."""
+        return f"{self.teams['home'].get('score')}-{self.teams['away'].get('score')}"
 
     # --- team scores -------------------------------------------------------
     def team_points(self, side, period):

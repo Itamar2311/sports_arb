@@ -84,7 +84,7 @@ CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "leg
 PERIOD_NAMES = {"game": "", "reg": "regulation", "h1": "1st half", "h2": "2nd half", "f5": "first 5 innings",
                 "f3": "first 3 innings", "f7": "first 7 innings"}
 STAT_NAMES = {"main": "", "games": "games", "corners": "corners", "cards": "cards", "sets": "sets",
-              "pra": "pts+reb+ast", "hrr": "hits+runs+RBIs", "sb": "stolen bases", "hr": "home runs",
+              "pra": "pts+reb+ast", "pr": "pts+reb", "pa": "pts+ast", "ra": "reb+ast", "hrr": "hits+runs+RBIs", "sb": "stolen bases", "hr": "home runs",
               "tb": "total bases", "rbi": "RBIs", "k": "strikeouts", "outs": "outs", "hits": "hits",
               "runs": "runs", "threes": "threes", "rebounds": "rebounds", "assists": "assists",
               "points": "points", "sog": "shots on goal", "sot": "shots on target", "shots": "shots",
@@ -365,6 +365,28 @@ def track(trades, events, offers_by_event):
             t["status"], t["closed"], t["close_reason"] = "awaiting result", stamp(), "game over - result not settled yet"
 
 
+def result_text(t, value, game):
+    """One plain sentence: what happened, in the terms of the bet ("Gabby Williams had 5 assists")."""
+    period, scope, stat, kind = t["family"]
+    when = f" ({PERIOD_NAMES.get(period, period)})" if PERIOD_NAMES.get(period, period) else ""
+    score = f" (final {game.score_text()})" if game and period == "game" and stat == "main" else ""
+    if scope.startswith("player:"):
+        who = t["market"].split(" total ")[0]
+        return f"{who} didn't play" if value == results.VOID else f"{who} had {value} {STAT_NAMES.get(stat) or stat}"
+    what = STAT_NAMES.get(stat) or ("goals" if t["sport"] in ("soccer", "hockey") else
+                                    "runs" if t["sport"] == "baseball" else "points")
+    if kind == "hcp":
+        if value == 0:
+            return f"tied{when}{score}"
+        winner = t["home"] if value > 0 else t["away"]
+        if game and period == "game":
+            hi, lo = sorted(int(float(x)) for x in game.score_text().split("-"))[::-1]
+            return f"{winner} won {hi}-{lo}"
+        return f"{winner} won by {abs(value)}{when}"
+    team = {"home": t["home"], "away": t["away"]}.get(scope)
+    return f"{team} scored {value} {what}{when}" if team else f"{value} {what} in total{when}{score}"
+
+
 def manual_results():
     """{trade id: value} typed in by hand for games ESPN doesn't cover."""
     try:
@@ -387,7 +409,6 @@ def settle(trades):
         if t["id"] in manual:
             value = manual[t["id"]]
             value = results.VOID if str(value).lower() == "void" else value
-            summary = "result entered by hand"
         else:
             try:
                 game = results.find_game(t["sport"], t["home"], t["away"], start)
@@ -398,7 +419,6 @@ def settle(trades):
                 t["close_reason"] = f"game {game.detail.lower()} - bets void, stakes back"
                 continue
             value = game.value(period, scope, stat, kind) if game and game.completed else None
-            summary = game.summary() if game else ""
         if value is None:
             if t["status"] == "awaiting result" and now > start + timedelta(hours=NO_RESULT_HOURS):
                 t["status"] = "needs result"
@@ -416,8 +436,7 @@ def settle(trades):
             payout += l["stake"] * l["odds"] if l["result"] == "win" else l["stake"] if l["result"] == "void" else 0
         t["profit"] = round(payout - t["stake"], 2)
         t["hit"] = all(l["result"] == "win" for l in t["legs"])
-        shown = "didn't play" if value == results.VOID else (f"margin {value:+d}" if kind == "hcp" else f"{value}")
-        t["result"] = f"{summary} -> {shown}"
+        t["result"] = result_text(t, value, game)
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
             "void - stakes back" if value == results.VOID else "one bet won"
