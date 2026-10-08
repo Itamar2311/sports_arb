@@ -5,8 +5,8 @@ Final scores and box scores from ESPN's public site API (no key needed), to sett
     game.value(period, scope, stat)     -> the number a bet settles on, None (not available), or VOID
 
 Covered:
-    scores by period   NHL (periods, regulation, OT/shootout in the final), NBA / WNBA / NFL /
-                       college (quarters or halves), MLB (innings -> first 3/5/7), soccer (all
+    scores by period   NHL (periods, regulation, OT/shootout in the final), NBA / WNBA / NBL / NFL /
+                       college incl. FCS (quarters or halves), MLB (innings -> first 3/5/7), soccer (all
                        leagues; 1st half from goal times; 90-minute score only)
     soccer corners     full game, both teams and each team
     player stats       basketball points/rebounds/assists/threes/pts+reb+ast, hockey goals/assists/
@@ -24,12 +24,13 @@ from books import player_key, team_score
 
 API = "https://site.api.espn.com/apis/site/v2/sports"
 LEAGUES = {"hockey": ["hockey/nhl"],
-           "basketball": ["basketball/nba", "basketball/wnba", "basketball/mens-college-basketball",
+           "basketball": ["basketball/nba", "basketball/wnba", "basketball/nbl", "basketball/mens-college-basketball",
                           "basketball/womens-college-basketball"],
            "football": ["football/nfl", "football/college-football"],
            "baseball": ["baseball/mlb"],
            "soccer": ["soccer/all"]}
-QUERY = {"football/college-football": "&groups=80", "basketball/mens-college-basketball": "&groups=50"}
+QUERY = {"football/college-football": ["&groups=80", "&groups=81"],          # FBS and FCS (small colleges)
+         "basketball/mens-college-basketball": ["&groups=50"]}
 PLAYER_STATS = {   # our stat -> ESPN box-score columns that add up to it
     "basketball": {"points": ["PTS"], "rebounds": ["REB"], "assists": ["AST"], "threes": ["3PT"],
                    "pra": ["PTS", "REB", "AST"], "pr": ["PTS", "REB"], "pa": ["PTS", "AST"], "ra": ["REB", "AST"]},
@@ -68,9 +69,10 @@ def match(name, competitor):
 def find_game(sport, home, away, start):
     """The ESPN game for a trade: same teams (either way round), start within 3 hours."""
     for path in LEAGUES.get(sport, []):
-        for day in sorted({start.date(), (start - timedelta(hours=10)).date()}):   # ESPN dates are US time
+        days = sorted({start.date(), (start - timedelta(hours=10)).date()})     # ESPN dates are US time
+        for day, query in ((d, q) for d in days for q in QUERY.get(path, [""])):
             try:
-                board = get(f"{API}/{path}/scoreboard?dates={day:%Y%m%d}&limit=500{QUERY.get(path, '')}")
+                board = get(f"{API}/{path}/scoreboard?dates={day:%Y%m%d}&limit=500{query}")
             except Exception:
                 continue
             for e in board.get("events", []):
