@@ -256,17 +256,17 @@ def leg_result(kind, outcome, line, value):
     raise ValueError(kind)
 
 
-# A placed bet stands when the book later moves or pulls the line, or takes the game off its pre-game
-# list at kickoff. Books void a placed bet for a pricing error ("palpable error"), and a sharp odds
-# correction right after the bet ("odds cut") is the sign of one - so only those legs count as voided.
-VOIDED_FLAGS = {"odds cut"}
+# Treated as in real life: a leg whose line was pulled, whose odds were cut sharply (a pricing error the
+# book voids) or whose game the book removed before kickoff is gone - stake back - and the legs left
+# settle on the result. (The trackers ignore pulls/removals in the last minutes before kickoff, when
+# books close pre-game betting anyway.)
+VOIDED_FLAGS = {"odds cut", "pulled", "game removed"}
 
 
 def real_money(legs, kind, value, line_of):
     """
-    What the bets would really have paid. A leg whose odds were cut sharply before kickoff (status in
-    VOIDED_FLAGS) is treated as voided by its book: stake back. The other legs stand and settle on
-    the result. -> (profit, [result per leg]) or None if the result is needed but unknown (value None).
+    What the bets would really have paid. A leg flagged before kickoff (status in VOIDED_FLAGS) is
+    gone: stake back. The other legs stand and settle on the result. -> (profit, [result per leg]) or None if the result is needed but unknown (value None).
     """
     out, payout = [], 0.0
     for l in legs:

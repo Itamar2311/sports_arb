@@ -141,8 +141,8 @@ class RealMoney(unittest.TestCase):
         self.assertEqual(m.results.real_money(legs, "ml2", 4, lambda l: 0), (round(52 * 1.95 + 48 - 100, 2), ["win", "void (flagged)"]))
         self.assertEqual(m.results.real_money(legs, "ml2", -4, lambda l: 0), (-52.0, ["lose", "void (flagged)"]))
         self.assertIsNone(m.results.real_money(legs, "ml2", None, lambda l: 0))     # result still needed
-        moved = [dict(legs[0]), dict(legs[1], status="pulled")]                      # line moved: the bet stands
-        self.assertEqual(m.results.real_money(moved, "ml2", -4, lambda l: 0)[1], ["lose", "win"])
+        pulled = [dict(legs[0]), dict(legs[1], status="pulled")]                     # pulled line: gone, stake back
+        self.assertEqual(m.results.real_money(pulled, "ml2", -4, lambda l: 0)[1], ["lose", "void (flagged)"])
 
 
 if __name__ == "__main__":

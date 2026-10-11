@@ -38,9 +38,8 @@ NO_RESULT_HOURS; their result can be looked up by hand and put in manual_results
     {"12": 7, "15": "void"}     trade id -> the number the bet settles on (total, home margin
                                 for a spread, or player stat), or "void"
 and the next scan settles them.
-Settled as real bets would be: a leg whose odds were cut sharply before kickoff (a pricing error, see
-results.VOIDED_FLAGS) counts as voided by its book - stake back - and the other leg stands. Moved or
-pulled lines don't matter: a placed bet stands.
+Settled as real bets would be: a leg flagged before kickoff (line pulled, odds cut sharply, game
+removed - see results.VOIDED_FLAGS) is gone - stake back - and the other leg stands on the result.
 
 Files: middle_trades.json (source of truth), middle_trades.csv, middle_dashboard.html, middle_log.txt
 Run through scanner.py, which fetches the books once per scan for this bot and arb_bot:
@@ -69,6 +68,7 @@ NO_RESULT_HOURS = 24        # no ESPN result this long after kickoff -> "needs r
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
 CUT_FLAG_PTS = 0.08
 POSTPONE_HOURS = 12
+CLOSING_MIN = 15            # books close pre-game betting around kickoff: no pulled/removed flags this close to it
 GAME_HOURS = {"soccer": 2.5, "basketball": 3, "hockey": 3.5, "football": 4, "baseball": 4,
               "tennis": 5, "cricket": 9}
 NOTIFY = True
@@ -327,11 +327,12 @@ def track(trades, events, offers_by_event):
         start = datetime.fromisoformat(t["start"])
         fam = tuple(t["family"])
         if t["status"] == "open" and now < start:
+            closing = now > start - timedelta(minutes=CLOSING_MIN)
             gone_everywhere = True
             for l in t["legs"]:
                 e = listed.get((l["book"], l["event_id"]))
                 if e is None:
-                    if l["status"] == "ok":
+                    if l["status"] == "ok" and not closing:
                         l["status"] = "game removed"
                     continue
                 gone_everywhere = False
@@ -350,7 +351,7 @@ def track(trades, events, offers_by_event):
                 elif offers_by_event.get((l["book"], l["event_id"])):
                     l["now_odds"] = None
                     l["missing"] = l.get("missing", 0) + 1
-                    if l["missing"] >= 2 and l["status"] == "ok":
+                    if l["missing"] >= 2 and l["status"] == "ok" and not closing:
                         l["status"] = "pulled"
                         flag(t, f"{l['book']} no longer offers {l['label']} - line moved or pulled")
             if t["status"] == "void":
@@ -437,7 +438,7 @@ def settle(trades):
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
             "void - stakes back" if value == results.VOID else \
-            "odds-cut leg voided (stake back), other leg " + ("won" if "win" in leg_results else "lost") \
+            "flagged leg voided (stake back), other leg " + ("won" if "win" in leg_results else "lost") \
             if any(r == "void (flagged)" for r in leg_results) else \
             "one bet won" if "win" in leg_results else "no bet won"
         if t["hit"]:
@@ -564,7 +565,7 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
 <th>Middle if</th><th class="n">Chance</th><th class="n">Total prob.</th><th class="n">Worst $</th>
 <th class="n">Expected $</th><th class="n">Best $</th><th class="n" title="the number the bet settled on: the stat or total, or the home team's margin for a spread">Result</th>
-<th class="n" title="as with real bets: a leg whose odds were cut sharply counts as voided by its book (stake back)">Profit $</th><th>Notes</th></tr>
+<th class="n" title="as with real bets: a leg flagged before kickoff (pulled, odds cut, game removed) is voided (stake back)">Profit $</th><th>Notes</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

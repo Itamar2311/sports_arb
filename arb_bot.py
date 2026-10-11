@@ -26,9 +26,8 @@ Tracking until the game ends - would a book cancel the bet?
     after kickoff + the sport's usual length -> "awaiting result".
 
 Settling, as with real money: the final score (ESPN, results.py) settles every leg - the winning leg
-pays, and a leg whose odds were cut sharply before kickoff (a pricing error - see results.VOIDED_FLAGS)
-is treated as voided by its book (stake back) while the other legs stand on the result. Moved or
-pulled lines don't matter: a placed bet stands. With no flag and no result found within NO_RESULT_HOURS it settles at the
+pays, and a leg flagged before kickoff (line pulled, odds cut sharply, game removed - see
+results.VOIDED_FLAGS) is gone: stake back, while the other legs stand on the result. With no flag and no result found within NO_RESULT_HOURS it settles at the
 locked minimum; a flagged arb without a result becomes "needs result" - look it up and add it to
 arb_manual_results.json
 ({"12": 3, "15": "void"}: trade id -> home margin for moneylines/spreads, the total for
@@ -65,6 +64,7 @@ MAX_PROFIT_PCT = 8.0        # bigger is almost always two different bets matched
 MATCH_MINUTES = 20          # same game if kickoff times are this close
 CUT_FLAG_PTS = 0.08         # leg's implied probability up 8+ points before kickoff = flag
 POSTPONE_HOURS = 12
+CLOSING_MIN = 15            # books close pre-game betting around kickoff: no pulled/removed flags this close to it
 GAME_HOURS = {"soccer": 2.5, "basketball": 3, "hockey": 3.5, "football": 4, "baseball": 4,
               "tennis": 5, "cricket": 9}     # kickoff -> settle; anything else 4h
 NO_RESULT_HOURS = 24        # no final score this long after kickoff -> fall back / needs result
@@ -320,12 +320,13 @@ def track(trades, events, offers_by_event):
         start = datetime.fromisoformat(t["start"])
         key = tuple(t["market_key"])
         if t["status"] == "open" and now < start:
+            closing = now > start - timedelta(minutes=CLOSING_MIN)
             gone_everywhere = True
             for l in t["legs"]:
                 e = listed.get((l["book"], l["event_id"]))
                 l["listed"] = e is not None
                 if e is None:
-                    if l["status"] == "ok":
+                    if l["status"] == "ok" and not closing:
                         l["status"] = "game removed"
                     continue
                 gone_everywhere = False
@@ -345,7 +346,7 @@ def track(trades, events, offers_by_event):
                 elif offers_by_event.get((l["book"], l["event_id"])):
                     l["now_odds"] = None
                     l["missing"] = l.get("missing", 0) + 1       # 2 scans in a row, not a one-off fetch gap
-                    if l["missing"] >= 2 and l["status"] == "ok":
+                    if l["missing"] >= 2 and l["status"] == "ok" and not closing:
                         l["status"] = "pulled"
                         flag(t, f"{l['book']} no longer offers {l['label']} - line moved or pulled")
             if t["status"] == "void":
@@ -419,7 +420,7 @@ def settle_real(trades):
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = (f"final {game.score_text()}: " if game else "") + \
             (f"{', '.join(won)} won" if won else "no leg won") + \
-            (" · odds-cut legs voided (stake back)" if flagged else "")
+            (" · flagged legs voided (stake back)" if flagged else "")
         notify(f"Arb settled: {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['close_reason']}")
 
 
@@ -511,13 +512,12 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
  <div class="tile">Flagged (book may cancel)<b>{len(flagged)}</b></div>
  <div class="tile">Worst case if open flagged legs voided<b>{money(at_risk)} $</b></div>
 </div>
-<div class="sub" style="margin-top:12px">Settled as with real money: on the final score, the winning leg pays; a leg whose odds
- were cut sharply before kickoff (a pricing error) counts as voided by its book (stake back), the other legs stand.
- Moved or pulled lines don't matter - a placed bet stands.</div>
+<div class="sub" style="margin-top:12px">Settled as with real money: on the final score, the winning leg pays; a leg flagged
+ before kickoff (line pulled, odds cut sharply, game removed) is gone - stake back - and the other legs stand.</div>
 <h2>Trades</h2><div class="wrap"><table>
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
 <th class="n">Total prob.</th><th class="n">Payout</th><th class="n">ROI</th>
-<th class="n" title="settled on the real result; legs whose odds were cut sharply count as voided by their book">Profit $</th><th>Notes</th></tr>
+<th class="n" title="settled on the real result; legs flagged before kickoff (pulled, odds cut, game removed) are voided">Profit $</th><th>Notes</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
