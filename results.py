@@ -207,6 +207,15 @@ class Game:
             total += int(float(str(raw).split("-")[0]))     # "3PT" is "made-attempted"
         return total
 
+    def bet_value(self, period, scope, stat, kind):
+        """value() for any bet kind: home margin for moneylines too, "yes"/"no" for both teams to score."""
+        if kind in ("ml2", "ml3"):
+            return self.value(period, "game", stat, "hcp")
+        if kind == "yn":
+            h, a = self.team_points("home", period), self.team_points("away", period)
+            return None if h is None or a is None else "yes" if h > 0 and a > 0 else "no"
+        return self.value(period, scope, stat, kind)
+
     # --- what a bet settles on ---------------------------------------------
     def value(self, period, scope, stat, kind):
         """Over/under: the total. Spread: home margin (home - away). None = can't tell."""
@@ -225,3 +234,48 @@ class Game:
         if kind == "hcp":
             return h - a if scope == "game" else None
         return {"game": h + a, "home": h, "away": a}.get(scope)
+
+
+# --- settling single bets ---------------------------------------------------
+def leg_result(kind, outcome, line, value):
+    """win / lose / void for one bet, given what the market settled on (bet_value)."""
+    if value == VOID:
+        return "void"
+    if kind == "yn":
+        return "win" if outcome == value else "lose"
+    if kind == "ou":
+        diff = value - line
+        return "void" if diff == 0 else "win" if (diff > 0) == (outcome == "over") else "lose"
+    if kind == "hcp":                    # value = home margin; home covers if margin + line > 0
+        diff = value + line
+        return "void" if diff == 0 else "win" if (diff > 0) == (outcome == "home") else "lose"
+    if kind == "ml2":                    # a tie in a 2-way moneyline is a push
+        return "void" if value == 0 else "win" if (value > 0) == (outcome == "home") else "lose"
+    if kind == "ml3":
+        return "win" if outcome == ("home" if value > 0 else "away" if value < 0 else "draw") else "lose"
+    raise ValueError(kind)
+
+
+# A placed bet stands when the book later moves or pulls the line, or takes the game off its pre-game
+# list at kickoff. Books void a placed bet for a pricing error ("palpable error"), and a sharp odds
+# correction right after the bet ("odds cut") is the sign of one - so only those legs count as voided.
+VOIDED_FLAGS = {"odds cut"}
+
+
+def real_money(legs, kind, value, line_of):
+    """
+    What the bets would really have paid. A leg whose odds were cut sharply before kickoff (status in
+    VOIDED_FLAGS) is treated as voided by its book: stake back. The other legs stand and settle on
+    the result. -> (profit, [result per leg]) or None if the result is needed but unknown (value None).
+    """
+    out, payout = [], 0.0
+    for l in legs:
+        if l.get("status", "ok") in VOIDED_FLAGS:
+            r = "void (flagged)"
+        elif value is None:
+            return None
+        else:
+            r = leg_result(kind, l["outcome"], line_of(l), value)
+        payout += l["stake"] * l["odds"] if r == "win" else l["stake"] if r.startswith("void") else 0
+        out.append(r)
+    return round(payout - sum(l["stake"] for l in legs), 2), out

@@ -38,6 +38,9 @@ NO_RESULT_HOURS; their result can be looked up by hand and put in manual_results
     {"12": 7, "15": "void"}     trade id -> the number the bet settles on (total, home margin
                                 for a spread, or player stat), or "void"
 and the next scan settles them.
+Settled as real bets would be: a leg whose odds were cut sharply before kickoff (a pricing error, see
+results.VOIDED_FLAGS) counts as voided by its book - stake back - and the other leg stands. Moved or
+pulled lines don't matter: a placed bet stands.
 
 Files: middle_trades.json (source of truth), middle_trades.csv, middle_dashboard.html, middle_log.txt
 Run through scanner.py, which fetches the books once per scan for this bot and arb_bot:
@@ -425,22 +428,18 @@ def settle(trades):
                 t["close_reason"] = ("ESPN has the game but not this stat" if game else
                                      "not on ESPN") + " - look it up and add it to manual_results.json"
             continue
-        payout = 0.0
-        for l in t["legs"]:
-            if value == results.VOID:
-                l["result"] = "void"
-            elif kind == "ou":
-                l["result"] = "win" if (value > l["line"]) == (l["outcome"] == "over") else "lose"
-            else:   # spread: value = home margin; home covers if margin + line > 0, away if margin + line < 0
-                l["result"] = "win" if (value + l["line"] > 0) == (l["outcome"] == "home") else "lose"
-            payout += l["stake"] * l["odds"] if l["result"] == "win" else l["stake"] if l["result"] == "void" else 0
-        t["profit"] = round(payout - t["stake"], 2)
-        t["hit"] = all(l["result"] == "win" for l in t["legs"])
+        t["profit"], leg_results = results.real_money(t["legs"], kind, value, lambda l: l["line"])
+        for l, r in zip(t["legs"], leg_results):
+            l["result"] = r
+        t["hit"] = all(r == "win" for r in leg_results)
         t["result"] = result_text(t, value, game)
         t["result_value"] = value              # the one number the bet settled on (or "void")
         t["status"], t["closed"] = "settled", stamp()
         t["close_reason"] = "middle hit - both bets won" if t["hit"] else \
-            "void - stakes back" if value == results.VOID else "one bet won"
+            "void - stakes back" if value == results.VOID else \
+            "odds-cut leg voided (stake back), other leg " + ("won" if "win" in leg_results else "lost") \
+            if any(r == "void (flagged)" for r in leg_results) else \
+            "one bet won" if "win" in leg_results else "no bet won"
         if t["hit"]:
             notify(f"Middle hit! {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['result']}")
 
@@ -565,7 +564,7 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
 <th>Middle if</th><th class="n">Chance</th><th class="n">Total prob.</th><th class="n">Worst $</th>
 <th class="n">Expected $</th><th class="n">Best $</th><th class="n" title="the number the bet settled on: the stat or total, or the home team's margin for a spread">Result</th>
-<th class="n">Profit $</th><th>Notes</th></tr>
+<th class="n" title="as with real bets: a leg whose odds were cut sharply counts as voided by its book (stake back)">Profit $</th><th>Notes</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

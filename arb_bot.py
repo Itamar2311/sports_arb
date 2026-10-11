@@ -23,9 +23,16 @@ Tracking until the game ends - would a book cancel the bet?
           what a pricing error ("palpable error") looks like, and books void those bets
       the bet disappears / the game disappears at one book while others still list it -> flagged
       the game disappears everywhere or kickoff moves 12h+ -> void (postponed), stake returned
-    after kickoff + the sport's usual length -> settled at the locked profit.
-    Flagged trades show what you'd lose in the worst case if the flagged leg were voided
-    and the remaining bet lost.
+    after kickoff + the sport's usual length -> "awaiting result".
+
+Settling, as with real money: the final score (ESPN, results.py) settles every leg - the winning leg
+pays, and a leg whose odds were cut sharply before kickoff (a pricing error - see results.VOIDED_FLAGS)
+is treated as voided by its book (stake back) while the other legs stand on the result. Moved or
+pulled lines don't matter: a placed bet stands. With no flag and no result found within NO_RESULT_HOURS it settles at the
+locked minimum; a flagged arb without a result becomes "needs result" - look it up and add it to
+arb_manual_results.json
+({"12": 3, "15": "void"}: trade id -> home margin for moneylines/spreads, the total for
+over/unders, "yes"/"no" for both teams to score).
 
 Files:
     arb_trades.json     every paper trade (the source of truth)
@@ -48,6 +55,7 @@ from itertools import product
 from math import ceil, floor
 
 import books
+import results
 from books import OUTCOMES, team_score
 
 # --- settings -------------------------------------------------------------
@@ -59,6 +67,7 @@ CUT_FLAG_PTS = 0.08         # leg's implied probability up 8+ points before kick
 POSTPONE_HOURS = 12
 GAME_HOURS = {"soccer": 2.5, "basketball": 3, "hockey": 3.5, "football": 4, "baseball": 4,
               "tennis": 5, "cricket": 9}     # kickoff -> settle; anything else 4h
+NO_RESULT_HOURS = 24        # no final score this long after kickoff -> fall back / needs result
 NOTIFY = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +75,7 @@ STATE = os.path.join(HERE, "arb_trades.json")
 CSV_FILE = os.path.join(HERE, "arb_trades.csv")
 DASHBOARD = os.path.join(HERE, "arb_dashboard.html")
 LOG = os.path.join(HERE, "arb_log.txt")
+MANUAL = os.path.join(HERE, "arb_manual_results.json")
 CSV_FIELDS = ["id", "status", "opened", "sport", "game", "start", "market", "legs", "implied_pct",
               "stake", "payout_min", "payout_max", "roi_pct", "profit", "flags", "closed", "close_reason"]
 
@@ -354,10 +364,63 @@ def track(trades, events, offers_by_event):
         elif t["status"] == "open":
             t["status"] = "started"
         if t["status"] == "started" and now >= start + timedelta(hours=GAME_HOURS.get(t["sport"], 4)):
-            t["status"], t["closed"] = "settled", stamp()
-            t["close_reason"] = "game over" + (" - flagged, see worst case" if t["flags"] else "")
-            t["profit"] = round(t["payout_min"] - t["stake"], 2)
-            notify(f"Arb settled: +${t['profit']:.2f}", f"{t['game']} - {t['market']}")
+            t["status"], t["profit"] = "awaiting result", None
+            t["close_reason"] = "game over - waiting for the final score"
+
+
+def manual_results():
+    try:
+        with open(MANUAL, encoding="utf-8") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def settle_real(trades):
+    """After the game: settle each arb on what the bets would really have paid (module docstring)."""
+    now = now_utc()
+    manual = manual_results()
+    for t in trades:
+        if t["status"] not in ("awaiting result", "needs result"):
+            continue
+        period, scope, stat, kind, line = t["market_key"]
+        start = datetime.fromisoformat(t["start"])
+        flagged = any(l["status"] in results.VOIDED_FLAGS for l in t["legs"])
+        value, game = None, None
+        if t["id"] in manual:
+            value = manual[t["id"]]
+            value = results.VOID if str(value).lower() == "void" else value
+        elif all(l["status"] in results.VOIDED_FLAGS for l in t["legs"]):
+            value = 0                           # every leg voided: nothing depends on the result
+        else:
+            try:
+                game = results.find_game(t["sport"], t["home"], t["away"], start)
+            except Exception:
+                game = None
+            if game and game.cancelled:
+                value = results.VOID
+            elif game and game.completed:
+                value = game.bet_value(period, scope, stat, kind)
+        real = results.real_money(t["legs"], kind, value, lambda l: line)
+        if real is None:
+            if now > start + timedelta(hours=NO_RESULT_HOURS):
+                if flagged:
+                    t["status"] = "needs result"
+                    t["close_reason"] = "flagged leg + no result found - add it to arb_manual_results.json"
+                else:                           # all bets stand: the locked minimum is what it pays at least
+                    t["status"], t["closed"] = "settled", stamp()
+                    t["profit"] = round(t["payout_min"] - t["stake"], 2)
+                    t["close_reason"] = "no result found - settled at the locked minimum"
+            continue
+        t["profit"], leg_results = real
+        for l, r in zip(t["legs"], leg_results):
+            l["result"] = r
+        won = [l["label"] for l, r in zip(t["legs"], leg_results) if r == "win"]
+        t["status"], t["closed"] = "settled", stamp()
+        t["close_reason"] = (f"final {game.score_text()}: " if game else "") + \
+            (f"{', '.join(won)} won" if won else "no leg won") + \
+            (" · odds-cut legs voided (stake back)" if flagged else "")
+        notify(f"Arb settled: {t['profit']:+.2f} $", f"{t['game']} - {t['market']}\n{t['close_reason']}")
 
 
 # --- output ---------------------------------------------------------------
@@ -382,25 +445,30 @@ def write_csv(trades):
 def write_dashboard(trades, last_scan):
     from html import escape
     done = [t for t in trades if t["status"] == "settled"]
-    live = [t for t in trades if t["status"] in ("open", "started")]
+    live = [t for t in trades if t["status"] in ("open", "started", "awaiting result", "needs result")]
     void = [t for t in trades if t["status"] == "void"]
     earned = sum(t["profit"] for t in done)
-    pending = sum(t["profit"] for t in live)
-    staked = sum(t["stake"] for t in done + live)
+    pending = sum(t["payout_min"] - t["stake"] for t in live)      # locked in, not settled yet
+    staked = sum(t["stake"] for t in done)
     flagged = [t for t in done + live if t["flags"]]
-    at_risk = sum(worst_if_voided(t) for t in flagged)
+    at_risk = sum(worst_if_voided(t) for t in live if t["flags"])
+    locked_done = sum(t["payout_min"] - t["stake"] for t in done)
 
     def money(x):
+        if x is None:
+            return ""
         return f'<span class="{"pos" if x > 0 else "neg" if x < 0 else ""}">{x:+.2f}</span>'
 
     def leg_html(l):
         cls = "" if l["status"] == "ok" else ' class="warn"'
         now = "" if l.get("now_odds") in (None, l["odds"]) else f" → {l['now_odds']:g}"
         st = "" if l["status"] == "ok" else f" · {escape(l['status'])}"
+        res = l.get("result")
+        res = f" <b class='{'pos' if res == 'win' else 'neg' if res == 'lose' else 'muted'}'>{escape(res)}</b>" if res else ""
         return (f"<div{cls}><b>${l['stake']}</b> {escape(l['label'])} @ {l['odds']:g}{now} "
-                f"<span class='muted'>{escape(l['book'])} · {l['prob'] * 100:.1f}%{st}</span></div>")
+                f"<span class='muted'>{escape(l['book'])} · {l['prob'] * 100:.1f}%{st}</span>{res}</div>")
 
-    order = {"open": 0, "started": 1, "settled": 2, "void": 3}
+    order = {"needs result": 0, "open": 1, "started": 2, "awaiting result": 3, "settled": 4, "void": 5}
     rows = "".join(
         f"<tr><td><span class='st {t['status']}'>{t['status']}</span></td><td class='n'>{escape(t['opened'][5:])}</td>"
         f"<td>{escape(t['sport'])}</td><td>{escape(t['game'])}<div class='muted'>"
@@ -435,17 +503,21 @@ th {{ color:var(--muted); font-weight:500; }} td.flags {{ min-width:140px; max-w
 <div class="sub">${STAKE} imaginary per arb, whole-dollar stakes · Pinnacle, FanDuel, LeoVegas, BetRivers (Ontario)
  · last scan {escape(last_scan)} · page reloads every minute</div>
 <div class="tiles">
- <div class="tile">Money earned<b>{money(earned)} $</b></div>
+ <div class="tile">Money earned (settled)<b>{money(earned)} $</b></div>
+ <div class="tile">ROI settled<b>{(earned / staked * 100 if staked else 0):+.2f}%</b></div>
+ <div class="tile" title="what the settled arbs promised when placed">Locked when placed<b>{money(locked_done)} $</b></div>
  <div class="tile">Locked in, not settled<b>{money(pending)} $</b></div>
- <div class="tile">Staked<b>${staked:,.0f}</b></div>
- <div class="tile">ROI<b>{((earned + pending) / staked * 100 if staked else 0):+.2f}%</b></div>
  <div class="tile">Open / settled / void<b>{len(live)} / {len(done)} / {len(void)}</b></div>
  <div class="tile">Flagged (book may cancel)<b>{len(flagged)}</b></div>
- <div class="tile">Worst case if flagged legs voided<b>{money(at_risk)} $</b></div>
+ <div class="tile">Worst case if open flagged legs voided<b>{money(at_risk)} $</b></div>
 </div>
+<div class="sub" style="margin-top:12px">Settled as with real money: on the final score, the winning leg pays; a leg whose odds
+ were cut sharply before kickoff (a pricing error) counts as voided by its book (stake back), the other legs stand.
+ Moved or pulled lines don't matter - a placed bet stands.</div>
 <h2>Trades</h2><div class="wrap"><table>
 <tr><th>Status</th><th>Placed</th><th>Sport</th><th>Game</th><th>Bet</th><th>Legs (stake, pick, odds, book, probability)</th>
-<th class="n">Total prob.</th><th class="n">Payout</th><th class="n">ROI</th><th class="n">Profit $</th><th>Flags</th></tr>
+<th class="n">Total prob.</th><th class="n">Payout</th><th class="n">ROI</th>
+<th class="n" title="settled on the real result; legs whose odds were cut sharply count as voided by their book">Profit $</th><th>Notes</th></tr>
 {rows}</table></div></body></html>"""
     tmp = DASHBOARD + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -462,9 +534,10 @@ def log(msg):
 # --- one scan --------------------------------------------------------------
 def configure(out_dir):
     """Write this bot's files into out_dir (scanner.py points it at the sports_arb folder)."""
-    global STATE, CSV_FILE, DASHBOARD, LOG
-    STATE, CSV_FILE, DASHBOARD, LOG = (os.path.join(out_dir, f) for f in
-                                       ("arb_trades.json", "arb_trades.csv", "arb_dashboard.html", "arb_log.txt"))
+    global STATE, CSV_FILE, DASHBOARD, LOG, MANUAL
+    STATE, CSV_FILE, DASHBOARD, LOG, MANUAL = (os.path.join(out_dir, f) for f in
+                                               ("arb_trades.json", "arb_trades.csv", "arb_dashboard.html",
+                                                "arb_log.txt", "arb_manual_results.json"))
 
 
 def process(data, trades):
@@ -486,6 +559,7 @@ def process(data, trades):
             open_trade(g, key, ok[0], ok[1], trades)
             placed += 1
     track(trades, data.events, data.by_event)
+    settle_real(trades)
     save(trades)
     write_csv(trades)
     write_dashboard(trades, stamp())

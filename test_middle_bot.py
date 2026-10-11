@@ -127,5 +127,23 @@ class Settling(unittest.TestCase):
         self.assertEqual(t["status"], "awaiting result")      # 5h after kickoff: keep waiting
 
 
+class RealMoney(unittest.TestCase):
+    def test_leg_results(self):
+        r = m.results.leg_result
+        self.assertEqual([r("ml3", "draw", 0, 0), r("ml2", "home", 0, 0), r("ml2", "away", 0, -3)], ["win", "void", "win"])
+        self.assertEqual([r("hcp", "home", -2.5, 3), r("hcp", "away", -2.5, 3), r("hcp", "home", -3.0, 3)],
+                         ["win", "lose", "void"])
+        self.assertEqual([r("ou", "over", 2.5, 3), r("ou", "under", 2.5, 3), r("yn", "yes", 0, "yes")], ["win", "lose", "win"])
+
+    def test_flagged_leg_is_voided(self):
+        legs = [{"stake": 52, "odds": 1.95, "outcome": "home", "status": "ok"},
+                {"stake": 48, "odds": 2.15, "outcome": "away", "status": "odds cut"}]
+        self.assertEqual(m.results.real_money(legs, "ml2", 4, lambda l: 0), (round(52 * 1.95 + 48 - 100, 2), ["win", "void (flagged)"]))
+        self.assertEqual(m.results.real_money(legs, "ml2", -4, lambda l: 0), (-52.0, ["lose", "void (flagged)"]))
+        self.assertIsNone(m.results.real_money(legs, "ml2", None, lambda l: 0))     # result still needed
+        moved = [dict(legs[0]), dict(legs[1], status="pulled")]                      # line moved: the bet stands
+        self.assertEqual(m.results.real_money(moved, "ml2", -4, lambda l: 0)[1], ["lose", "win"])
+
+
 if __name__ == "__main__":
     unittest.main()
