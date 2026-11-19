@@ -73,6 +73,7 @@ class Offer:
     outcome: str
     odds: float          # decimal
     ref: str = ""        # what to re-fetch to re-check this price (FanDuel tab, Pinnacle sport)
+    src: str = ""        # the book's own market name, kept on trades to trace a bad match
 
     @property
     def key(self):
@@ -137,27 +138,38 @@ def line_ok(line, sport):
     return frac == 0.5 or (frac == 0 and sport in WHOLE_LINES_OK)
 
 
+ORDINALS = {"1st": 1, "first": 1, "2nd": 2, "second": 2, "3rd": 3, "third": 3, "4th": 4, "fourth": 4}
+ORD = r"(1st|2nd|3rd|4th|first|second|third|fourth)"
+
+
 def period_of(text, sport):
-    """Period from a market label; None = a time slice we don't compare (innings, minutes...)."""
+    """
+    Period from a market label; None = a time slice we don't compare (innings, minutes...) or one
+    we can't read. A label that mentions a quarter/half/period/set we can't place is skipped, never
+    taken for the full game ("1st Qtr Points" read as game points made fake middles).
+    """
     t = text.lower()
     if re.search(r"\d+:\d+\s*-\s*\d+:\d+|minutes|\d(st|nd|rd|th) inning|\binning \d", t):
         return None
     m = re.search(r"first (\d) innings|(\d)(?:st|nd|rd|th) 5 innings", t)
     if m:
         return f"f{m.group(1) or 5}"
-    if re.search(r"1st half|first half|half[- ]time", t):
+    if re.search(rf"\b(1st|first) half\b|half[- ]time|\b1h\b", t):
         return "h1"
-    if re.search(r"2nd half|second half", t):
+    if re.search(rf"\b(2nd|second) half\b|\b2h\b", t):
         return "h2"
-    m = re.search(r"quarter (\d)|(\d)(?:st|nd|rd|th) quarter", t)
+    m = re.search(rf"quarter (\d)|\b{ORD} (quarter|qtr)\b|\bq([1-4])\b|\b([1-4])q\b", t)
     if m:
-        return f"q{m.group(1) or m.group(2)}"
-    m = re.search(r"period (\d)|(\d)(?:st|nd|rd|th) period", t)
+        n = m.group(1) or ORDINALS.get(m.group(2)) or m.group(4) or m.group(5)
+        return f"q{n}"
+    m = re.search(rf"period (\d)|\b{ORD} period\b|\bp([1-3])\b", t)
     if m:
-        return f"p{m.group(1) or m.group(2)}"
-    m = re.search(r"\bset (\d)|(\d)(?:st|nd|rd|th) set", t)
+        return f"p{m.group(1) or ORDINALS.get(m.group(2)) or m.group(3)}"
+    m = re.search(rf"\bset (\d)|\b{ORD} set\b", t)
     if m:
-        return f"set{m.group(1) or m.group(2)}"
+        return f"set{m.group(1) or ORDINALS.get(m.group(2))}"
+    if re.search(r"quarter|qtr|\bhalf\b|\bperiod\b|innings?\b|\bset\b", t):
+        return None                     # some time slice we couldn't place: skip rather than guess
     if re.search(r"regular time|regulation|60 min|excludes ot", t) and sport != "soccer":
         return "reg"
     return "game"
@@ -329,6 +341,7 @@ def parse_pinnacle(sport, matchups, markets, ref=""):
             else:
                 o = None
             if o and o.outcome in OUTCOMES[o.kind]:
+                o.src = f"{'player prop' if pk else t} period {mk['period']}"
                 offers.append(o)
     return list(events.values()), offers
 
@@ -411,6 +424,7 @@ def parse_kambi(book, ev, bet_offers):
         def add(scope, stat, kind, line, outcome, o):
             x = offer(book, eid, period, scope, stat, kind, line, outcome, o["odds"] / 1000, sport)
             if x and x.outcome in OUTCOMES[x.kind]:
+                x.src = label
                 out.append(x)
 
         if typ == "Match":
@@ -550,6 +564,7 @@ def parse_fanduel(sport, event, markets, ref=""):
             return
         x = offer(book, eid, period, scope, stat, kind, line, outcome, round(odds, 4), sport, ref)
         if x and x.outcome in OUTCOMES[x.kind]:
+            x.src = name
             out.append(x)
 
     for m in markets:

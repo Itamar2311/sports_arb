@@ -64,6 +64,7 @@ MAX_RISK = 6.0              # worst case (only one bet wins) may lose at most th
 MIN_EV = -1.0               # expected profit at least this (loose for now, to collect data)
 MAX_RISK_NO_EV = 1.0        # when the chance of the middle can't be estimated: lose at most this
 MIN_LEG_ODDS = 1.25         # no lopsided pairs (a 1.01 favourite + a long shot isn't a middle)
+NO_KICKOFF_MIN = 5          # no new trades this close to kickoff (live odds creep in)
 NO_RESULT_HOURS = 24        # no ESPN result this long after kickoff -> "needs result" (manual_results.json)
 MAX_WORST = 8.0             # worst case better than +8% = almost surely two different bets matched
 CUT_FLAG_PTS = 0.08
@@ -198,6 +199,8 @@ def find_middles(games, offers_by_event):
                     n = evaluate(low, high, p1, p2)
                     if not n:
                         continue
+                    if fam[1].startswith("player:") and n["p_middle"] is None:
+                        continue        # player props only when another book prices both lines (bad matches hide here)
                     rank = (n["expected"] is not None, n["expected"] if n["expected"] is not None else n["worst"])
                     if top is None or rank > top[0]:
                         top = (rank, low, high, n)
@@ -262,7 +265,9 @@ def confirm(g, fam, low, high, by_book, probs):
     fresh = {}
     for leg in (low, high):
         e, flipped = g["books"][leg.book]
-        offers, _ = by_book[leg.book].refetch(e.id, leg.ref)
+        offers, listed = by_book[leg.book].refetch(e.id, leg.ref)
+        if not listed:                     # game started or gone: those would be live odds
+            return None
         same = [o for o in oriented(offers, flipped)
                 if (o.period, o.scope, o.stat, o.kind) == fam and o.line == leg.line and o.outcome == leg.outcome]
         if not same:
@@ -281,7 +286,7 @@ def open_trade(g, fam, low, high, n, trades):
         e, flipped = g["books"][leg.book]
         legs.append({"book": leg.book, "event_id": leg.event_id, "flipped": flipped, "outcome": leg.outcome,
                      "line": leg.line, "label": side_label(kind, leg.outcome, leg.line, ref.home, ref.away),
-                     "ref": leg.ref, "odds": leg.odds, "prob": round(1 / leg.odds, 4), "stake": stake,
+                     "ref": leg.ref, "market_name": leg.src, "odds": leg.odds, "prob": round(1 / leg.odds, 4), "stake": stake,
                      "payout": round(stake * leg.odds, 2), "now_odds": leg.odds, "status": "ok"})
     features = {"hours_to_start": round((ref.start - now_utc()).total_seconds() / 3600, 2),
                 "line_gap": abs(high.line - low.line), "low_odds": low.odds, "high_odds": high.odds,
@@ -594,13 +599,18 @@ def process(data, trades):
     for t in trades:                       # former "close case" trades are regular trades now
         t.pop("tier", None)
         t["key"] = t["key"].removeprefix("candidate|")
-    taken = {t["key"] for t in trades}
+    taken = {(tuple(t["family"]), l["book"], l["event_id"]) for t in trades for l in t["legs"]}
+    soon = now_utc() + timedelta(minutes=NO_KICKOFF_MIN)
     new = []
     for g, fam, low, high, n in sorted(middles, key=lambda m: -(m[4]["expected"] or -99)):
-        tk = trade_key(g, fam)
-        if tk in taken:
+        if min(e.start for e, _ in g["books"].values()) <= soon:
             continue
-        taken.add(tk)
+        # one trade per bet family per game - matched on the books' own game ids, so the same game
+        # listed under another name ("ATL Hawks" / "Atlanta Hawks") can't be traded twice
+        legs_keys = {(fam, o.book, o.event_id) for o in (low, high)}
+        if legs_keys & taken:
+            continue
+        taken |= legs_keys
         try:
             # fair probabilities from this scan; they don't move in the seconds the re-check takes
             ok = confirm(g, fam, low, high, data.by_book, probs_for(g, fam, low, high, data.by_event))

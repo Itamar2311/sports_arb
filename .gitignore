@@ -11,3 +11,4 @@ middle_log.txt
 *.tmp
 manual_results.json
 arb_manual_results.json
+results_tried.json

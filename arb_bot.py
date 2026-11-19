@@ -49,6 +49,7 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from itertools import product
 from math import ceil, floor
@@ -67,6 +68,7 @@ POSTPONE_HOURS = 12
 CLOSING_MIN = 15            # books close pre-game betting around kickoff: no pulled/removed flags this close to it
 GAME_HOURS = {"soccer": 2.5, "basketball": 3, "hockey": 3.5, "football": 4, "baseball": 4,
               "tennis": 5, "cricket": 9}     # kickoff -> settle; anything else 4h
+NO_KICKOFF_MIN = 5          # no new trades this close to kickoff (live odds creep in)
 NO_RESULT_HOURS = 24        # no final score this long after kickoff -> fall back / needs result
 NOTIFY = True
 
@@ -125,7 +127,7 @@ def flip(o):
     scope = swap.get(o.scope, o.scope)
     outcome = swap.get(o.outcome, o.outcome) if o.kind in ("ml2", "ml3", "hcp") else o.outcome
     line = -o.line if o.kind == "hcp" else o.line
-    return books.Offer(o.book, o.event_id, o.period, scope, o.stat, o.kind, line, outcome, o.odds, o.ref)
+    return replace(o, scope=scope, line=line, outcome=outcome)
 
 
 def oriented(offers, flipped):
@@ -237,6 +239,7 @@ def open_trade(g, key, best, n, trades):
         e, flipped = g["books"][o.book]
         legs.append({"book": o.book, "event_id": o.event_id, "flipped": flipped, "outcome": outcome,
                      "label": outcome_label(key, outcome, ref.home, ref.away), "ref": o.ref,
+                     "market_name": o.src,
                      "odds": o.odds, "prob": round(1 / o.odds, 4), "stake": n["stakes"][outcome],
                      "payout": round(n["stakes"][outcome] * o.odds, 2), "now_odds": o.odds,
                      "status": "ok", "listed": True})
@@ -262,7 +265,9 @@ def confirm(g, key, best, by_book):
         e, flipped = g["books"][book]
         refs = {o.ref for o in best.values() if o.book == book}
         for ref in refs:
-            offers, _ = by_book[book].refetch(e.id, ref)
+            offers, listed = by_book[book].refetch(e.id, ref)
+            if not listed:                 # game started or gone: those would be live odds
+                return None
             for o in oriented(offers, flipped):
                 if o.key == key:
                     fresh.setdefault(o.outcome, []).append(o)
@@ -543,13 +548,16 @@ def configure(out_dir):
 def process(data, trades):
     """One scan's data (from scanner.collect) -> new paper trades, tracking, files. Returns a summary."""
     arbs = find_arbs(data.games, data.by_event)
-    taken = {t["key"] for t in trades}
+    taken = {(tuple(t["market_key"]), l["book"], l["event_id"]) for t in trades for l in t["legs"]}
+    soon = now_utc() + timedelta(minutes=NO_KICKOFF_MIN)
     placed = 0
     for g, key, best, n in sorted(arbs, key=lambda a: -a[3]["profit_pct"]):
-        tk = trade_key(g, key)
-        if tk in taken:
+        if min(e.start for e, _ in g["books"].values()) <= soon:
             continue
-        taken.add(tk)
+        legs_keys = {(tuple(key), o.book, o.event_id) for o in best.values()}   # same bets under another game name
+        if legs_keys & taken:
+            continue
+        taken |= legs_keys
         try:
             ok = confirm(g, key, best, data.by_book)
         except Exception as ex:
